@@ -21,6 +21,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install pre-commit ruff pytest
 
+      - name: Install Python dependencies
+        run: |
+          pip install -r src/backend/requirements.txt
+
       - name: Run pre-commit
         run: |
           pre-commit run --all-files
