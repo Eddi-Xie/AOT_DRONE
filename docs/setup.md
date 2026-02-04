@@ -27,7 +27,7 @@ cd drone-stack
 
 ---
 
-## Python Tooling Setup
+## Python Setup
 
 Install Python tooling (recommended inside a virtual environment or conda environment).
 
@@ -46,6 +46,11 @@ Run all checks manually (this mirrors what CI runs).
 
 ```bash
 python -m pre_commit run --all-files
+```
+
+Install the required libraries for backend.
+```bash
+python -m pip install -r src/backend/requirements.txt
 ```
 
 ---
