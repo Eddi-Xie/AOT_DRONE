@@ -5,10 +5,14 @@ This document is the source of truth for inter-process communication between:
 - Backend (Python) providing WebSocket API to React UI
 - Vision (Python) producing tracking signals
 
+All values and numeric codes in this document are normative.
+
+---
+
 ## 1. Enums
 
 ### 1.1 TrackingState
-Numeric values must match Python DetectState IntEnum.
+Numeric values must match the Python DetectState IntEnum.
 
 - NoTarget = 1
 - TargetDetected = 2
@@ -21,47 +25,71 @@ Numeric values must match Python DetectState IntEnum.
 - LandSafely = 2
 - Takeoff = 3
 
-## 2. Transport Overview
+---
 
-### 2.1 Telemetry (FC -> Backend): UDP
+## 2. Ports, Rates, Limits
+
+### 2.1 Ports
+- UDP telemetry (FC -> Backend): 127.0.0.1:9001
+- UDP vision (Vision -> Backend): 127.0.0.1:9003
+- TCP commands (Backend -> FC): FC listens on 0.0.0.0:9002
+
+### 2.2 Nominal Rates
+- Telemetry UDP: 50 Hz (or same as FC loop)
+- Vision UDP: 10–30 Hz
+- Commands TCP: 20–50 Hz (backend should resend latest command at a fixed rate)
+
+### 2.3 Size Limits
+- Max UDP telemetry datagram payload: 1024 bytes
+- Max UDP vision datagram payload: 512 bytes
+- Max TCP command frame payload: 4096 bytes
+
+If a received UDP datagram exceeds the configured max size, the receiver must drop it and log the event.
+
+---
+
+## 3. Transport Overview
+
+### 3.1 Telemetry (FC -> Backend): UDP
 Telemetry is sent as UDP datagrams. Loss is acceptable; backend displays latest.
 
-- Protocol: UDP
-- Address: 127.0.0.1
-- Port: 9001
-- Rate: 50 Hz (or same as FC loop)
-- Max datagram payload: 1024 bytes
+Design constraints:
+- Sender must not block on telemetry output.
 - Each datagram must be self-contained and parseable independently.
 
-### 2.2 Vision (Vision -> Backend): UDP (optional but recommended)
-Vision tracking is sent as UDP datagrams.
+### 3.2 Vision (Vision -> Backend): UDP
+Vision tracking is sent as UDP datagrams. Loss is acceptable; backend uses latest.
 
-- Protocol: UDP
-- Address: 127.0.0.1
-- Port: 9003
-- Rate: 10–30 Hz
-- Max datagram payload: 512 bytes
-
-### 2.3 Commands (Backend -> FC): TCP
+### 3.3 Commands (Backend -> FC): TCP
 Commands are reliable. Backend connects to FC’s TCP command server.
 
-- Protocol: TCP
-- FC listens on: 0.0.0.0:9002
 - Backend connects to: <FC_IP>:9002
-- Command frames are length-prefixed (see Section 4).
-- Max frame length: 4096 bytes
+- FC listens on: 0.0.0.0:9002
+- Command frames are length-prefixed (see Section 5).
 
-## 3. Message Formats
+---
+
+## 4. Message Formats (JSON v1)
 
 All messages are UTF-8 JSON in v1.
 
-### 3.1 Telemetry Datagram (UDP, FC -> Backend)
-JSON object fields:
+### 4.1 Common Fields
+- type: string identifying message kind ("TEL", "VIS", "CMD")
+- seq: integer, monotonic per-sender (wrap-around allowed)
+- timestamp_s: float seconds
 
-Required:
+Timestamp guidance:
+- Prefer a monotonic clock source where available.
+- timestamp_s is for ordering/diagnostics; receivers must rely on seq for drop/gap detection.
+
+---
+
+### 4.2 Telemetry Datagram (UDP, FC -> Backend)
+
+Required fields:
 - type: "TEL"
-- seq: integer (monotonic, wraps allowed)
-- timestamp_s: float (seconds, monotonic preferred)
+- seq: integer
+- timestamp_s: float
 - control_mode: int (ControlMode)
 - tracking_state: int (TrackingState)
 - distFront_m: float
@@ -75,9 +103,11 @@ Required:
 
 Semantics:
 - target_x, target_y are normalized image coordinates in [-1, 1]
-  - (0,0) is center, +x right, +y up
+  - (0, 0) is center, +x is right, +y is up
 - bound_w, bound_h are normalized sizes in [0, 1]
 - confidence in [0, 1]
+- If tracking_state != Tracking, target_x/target_y/bound_w/bound_h/confidence should still be present.
+  - Use 0.0 for target_x/target_y/bound_w/bound_h and 0.0 confidence when no target is available.
 
 Example:
 {
@@ -96,19 +126,27 @@ Example:
   "confidence": 0.86
 }
 
-### 3.2 Vision Datagram (UDP, Vision -> Backend)
-JSON object fields:
+---
 
-Required:
+### 4.3 Vision Datagram (UDP, Vision -> Backend)
+
+Required fields:
 - type: "VIS"
-- seq: integer (monotonic, wraps allowed)
+- seq: integer
 - timestamp_s: float
 - tracking_state: int (TrackingState)
-- loc_x: float (normalized [-1, 1])
-- loc_y: float (normalized [-1, 1])
-- bound_w: float (normalized [0, 1])
-- bound_h: float (normalized [0, 1])
-- confidence: float [0, 1]
+- loc_x: float
+- loc_y: float
+- bound_w: float
+- bound_h: float
+- confidence: float
+
+Semantics:
+- loc_x, loc_y are normalized in [-1, 1]
+  - (0, 0) is center, +x is right, +y is up
+- bound_w, bound_h are normalized in [0, 1]
+- confidence in [0, 1]
+- If tracking_state != Tracking, set loc_x/loc_y/bound_w/bound_h/confidence to 0.0.
 
 Example:
 {
@@ -123,7 +161,9 @@ Example:
   "confidence": 0.85
 }
 
-## 4. TCP Command Framing (Backend -> FC)
+---
+
+## 5. TCP Command Framing (Backend -> FC)
 
 TCP stream is framed with a 4-byte big-endian unsigned length prefix:
 
@@ -132,21 +172,29 @@ TCP stream is framed with a 4-byte big-endian unsigned length prefix:
 - payload_length must be 1..4096
 - If payload_length is outside limits, receiver must close the connection.
 
-### 4.1 Command Payload (JSON)
+---
+
+### 5.1 Command Payload (JSON)
+
 Required fields:
 - type: "CMD"
+- seq: integer
 - timestamp_s: float
 - desired_mode: int (ControlMode)
 
-Optional fields (can be expanded later):
+Optional fields (expand later):
 - arm: bool
 - land_safely: bool
 - setpoints: object
-- tracking: object (latest vision fused data)
+- tracking: object (latest vision data as used by backend)
+
+Backend behavior:
+- Backend should resend the latest CMD at a fixed rate (20–50 Hz) while connected.
 
 Example:
 {
   "type": "CMD",
+  "seq": 9001,
   "timestamp_s": 1706980000.456,
   "desired_mode": 1,
   "arm": true,
@@ -158,9 +206,11 @@ Example:
   }
 }
 
-## 5. Safety & Timeout Behavior
+---
 
-### 5.1 Command Timeout
+## 6. Safety & Timeout Behavior
+
+### 6.1 Command Timeout
 FC must track last valid command receive time.
 
 - CMD_TIMEOUT_S = 0.5 seconds
@@ -169,10 +219,12 @@ If no valid CMD frame is received within CMD_TIMEOUT_S:
 - FC must enter LandSafely OR apply neutral/hold behavior (implementation-defined),
 - and reflect the degraded state in telemetry.
 
-### 5.2 Backend Disconnect
+### 6.2 Backend Disconnect
 Backend should retry connecting to FC with a backoff (e.g., 1s intervals).
 UI should indicate command link status.
 
-## 6. Versioning
+---
+
+## 7. Versioning
 Messages include `type` field; a future `ver` field may be added.
-Any breaking changes must update this doc first.
+Any breaking changes must update this document first.
