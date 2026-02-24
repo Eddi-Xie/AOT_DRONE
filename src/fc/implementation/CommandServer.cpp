@@ -18,6 +18,14 @@ double now_s() {
     using clock = std::chrono::steady_clock;
     return std::chrono::duration<double>(clock::now().time_since_epoch()).count();
 }
+
+bool should_log(double now_s_value, double& last_log_s, double interval_s) {
+    if (last_log_s < 0.0 || (now_s_value - last_log_s) >= interval_s) {
+        last_log_s = now_s_value;
+        return true;
+    }
+    return false;
+}
 } // namespace
 
 namespace fc {
@@ -68,6 +76,7 @@ void CommandServer::stop() {
 }
 
 void CommandServer::run_loop() {
+    double last_link_lost_log_s = -1.0;
     while (running_.load()) {
         std::cout << "[FC] Waiting for TCP command client on :" << port_ << "\n";
         client_fd_ = ::accept(listen_fd_, nullptr, nullptr);
@@ -82,7 +91,10 @@ void CommandServer::run_loop() {
         while (running_.load()) {
             std::string json;
             if (!read_frame(client_fd_, json, static_cast<uint32_t>(proto::TCP_MAX_FRAME_BYTES))) {
-                std::cout << "[FC] Command link lost / invalid frame\n";
+                const double t_s = now_s();
+                if (should_log(t_s, last_link_lost_log_s, 1.0)) {
+                    std::cout << "[FC] Command link lost / invalid frame\n";
+                }
                 ::close(client_fd_);
                 client_fd_ = -1;
                 break;

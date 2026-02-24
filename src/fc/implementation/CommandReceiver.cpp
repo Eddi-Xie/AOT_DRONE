@@ -2,6 +2,7 @@
 
 #include <cctype>
 #include <cerrno>
+#include <cmath>
 #include <cstdlib>
 #include <limits>
 #include <string>
@@ -103,22 +104,15 @@ bool parse_json_number_token(const std::string& json, const char* key, std::stri
         }
     }
 
-    out_token = json.substr(start, i - start);
-    return true;
-}
+    if (i < json.size()) {
+        const char end = json[i];
+        if (!(end == ',' || end == '}' || end == ']' ||
+              std::isspace(static_cast<unsigned char>(end)))) {
+            return false;
+        }
+    }
 
-bool parse_int(const std::string& token, int& out_value) {
-    errno = 0;
-    char* end = nullptr;
-    const long v = std::strtol(token.c_str(), &end, 10);
-    if (errno != 0 || end == token.c_str() || *end != '\0') {
-        return false;
-    }
-    if (v < static_cast<long>(std::numeric_limits<int>::min()) ||
-        v > static_cast<long>(std::numeric_limits<int>::max())) {
-        return false;
-    }
-    out_value = static_cast<int>(v);
+    out_token = json.substr(start, i - start);
     return true;
 }
 
@@ -129,7 +123,29 @@ bool parse_double(const std::string& token, double& out_value) {
     if (errno != 0 || end == token.c_str() || *end != '\0') {
         return false;
     }
+    if (!std::isfinite(v)) {
+        return false;
+    }
     out_value = v;
+    return true;
+}
+
+bool parse_int_like(const std::string& token, int& out_value) {
+    double v = 0.0;
+    if (!parse_double(token, v)) {
+        return false;
+    }
+    if (v < static_cast<double>(std::numeric_limits<int>::min()) ||
+        v > static_cast<double>(std::numeric_limits<int>::max())) {
+        return false;
+    }
+
+    const double nearest = std::nearbyint(v);
+    if (std::fabs(v - nearest) > 1e-6) {
+        return false;
+    }
+
+    out_value = static_cast<int>(nearest);
     return true;
 }
 
@@ -153,8 +169,8 @@ bool parse_cmd_frame(const std::string& json, CommandFrame& out) {
     }
 
     CommandFrame parsed;
-    if (!parse_int(seq_token, parsed.seq) || !parse_double(ts_token, parsed.timestamp_s) ||
-        !parse_int(mode_token, parsed.desired_mode)) {
+    if (!parse_int_like(seq_token, parsed.seq) || !parse_double(ts_token, parsed.timestamp_s) ||
+        !parse_int_like(mode_token, parsed.desired_mode)) {
         return false;
     }
     parsed.raw_json = json;

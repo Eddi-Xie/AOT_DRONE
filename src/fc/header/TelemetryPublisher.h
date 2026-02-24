@@ -18,6 +18,8 @@ class TelemetryPublisher {
   private:
     int sock_ = -1;
     void* addr_ = nullptr; // sockaddr_in owned by this object
+    double last_oversize_log_s_ = -1.0;
+    double last_send_fail_log_s_ = -1.0;
 };
 
 } // namespace fc

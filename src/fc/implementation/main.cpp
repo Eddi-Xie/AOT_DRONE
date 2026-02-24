@@ -21,6 +21,7 @@ std::atomic<bool> g_running{true};
 
 double monotonic_now_s() {
     using clock = std::chrono::steady_clock;
+    // timestamp_s is monotonic for ordering/diagnostics, not wall-clock Unix time.
     return std::chrono::duration<double>(clock::now().time_since_epoch()).count();
 }
 
@@ -108,9 +109,7 @@ int main() {
         }
 
         const std::string tel_json = build_tel_json(tel_seq, control_mode, tracking_state);
-        if (!telemetry_publisher.send_json(tel_json)) {
-            std::cerr << "[FC] Telemetry send failed\n";
-        }
+        telemetry_publisher.send_json(tel_json);
 
         if ((tel_seq % 25U) == 0U) {
             std::cout << "[FC] TEL seq=" << tel_seq << " mode=" << control_mode
