@@ -15,6 +15,11 @@ Monorepo for the drone control stack:
 - `docs/setup.md`: build/run instructions
 - `docs/decisions.md`: architecture decision records (ADRs)
 
+## Reproducibility
+- Pinned Python tooling: `requirements-dev.txt`
+- Pinned backend runtime deps: `src/backend/requirements.txt`
+- CI-equivalent local check command: `./scripts/dev/runall.sh`
+
 ## Current legacy message formats (to be standardized)
 
 Telemetry:
