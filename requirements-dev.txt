@@ -1,0 +1,4 @@
+# Pinned developer tooling for reproducible local and CI checks.
+pre-commit==4.0.1
+ruff==0.6.9
+pytest==8.3.3

@@ -32,8 +32,10 @@ cd drone-stack
 Install Python tooling (recommended inside a virtual environment or conda environment).
 
 ```bash
-python -m pip install --upgrade pip
-python -m pip install pre-commit ruff pytest
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip==24.3.1
+python -m pip install -r requirements-dev.txt
 ```
 
 Install the pre-commit git hooks so checks run automatically on every commit.
@@ -52,6 +54,15 @@ Install the required libraries for backend.
 ```bash
 python -m pip install -r src/backend/requirements.txt
 ```
+
+The repository includes reproducible helper scripts:
+
+```bash
+./scripts/dev/lint.sh
+./scripts/dev/runall.sh
+```
+
+`runall.sh` installs pinned dependencies, runs lint/tests, and verifies the C++ build.
 
 ---
 
