@@ -1,10 +1,14 @@
 #include "CommandServer.h"
+#include "FlightController.h"
 #include "ProtocolConstants.h"
 #include "TelemetryPublisher.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <csignal>
+#include <cstdint>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -12,37 +16,124 @@
 
 namespace {
 
-constexpr int kControlModeLandSafely = 2;
-constexpr int kTrackingStateTracking = 3;
-constexpr int kTrackingStateSearching = 4;
 constexpr int kTelHz = 50;
+constexpr double kAxisRangeUs = 300.0;
+constexpr double kMaxYawRateDps = 180.0;
 
 std::atomic<bool> g_running{true};
-
-double monotonic_now_s() {
-    using clock = std::chrono::steady_clock;
-    // timestamp_s is monotonic for ordering/diagnostics, not wall-clock Unix time.
-    return std::chrono::duration<double>(clock::now().time_since_epoch()).count();
-}
 
 void handle_signal(int) {
     g_running.store(false);
 }
 
-std::string build_tel_json(uint64_t seq, int control_mode, int tracking_state) {
+bool to_control_mode(int raw_mode, fc::ControlMode& out_mode) {
+    switch (raw_mode) {
+    case 0:
+        out_mode = fc::ControlMode::Manual;
+        return true;
+    case 1:
+        out_mode = fc::ControlMode::Tracking;
+        return true;
+    case 2:
+        out_mode = fc::ControlMode::LandSafely;
+        return true;
+    case 3:
+        out_mode = fc::ControlMode::Takeoff;
+        return true;
+    default:
+        return false;
+    }
+}
+
+double clamp_target_coord(double value) {
+    if (!std::isfinite(value)) {
+        return 0.0;
+    }
+    return std::clamp(value, -1.0, 1.0);
+}
+
+double clamp_unit(double value) {
+    if (!std::isfinite(value)) {
+        return 0.0;
+    }
+    return std::clamp(value, 0.0, 1.0);
+}
+
+std::uint16_t normalized_axis_to_pwm(double normalized) {
+    if (!std::isfinite(normalized)) {
+        return fc::rc::DRONE_MID;
+    }
+
+    const double clamped = std::clamp(normalized, -1.0, 1.0);
+    const double pwm = static_cast<double>(fc::rc::DRONE_MID) + clamped * kAxisRangeUs;
+    return static_cast<std::uint16_t>(std::lround(std::clamp(
+        pwm, static_cast<double>(fc::rc::DRONE_MIN), static_cast<double>(fc::rc::DRONE_MAX))));
+}
+
+std::uint16_t yaw_rate_to_pwm(double yaw_rate_dps) {
+    if (!std::isfinite(yaw_rate_dps)) {
+        return fc::rc::DRONE_MID;
+    }
+
+    const double limited = std::clamp(yaw_rate_dps, -kMaxYawRateDps, kMaxYawRateDps);
+    const double normalized = limited / kMaxYawRateDps;
+    return normalized_axis_to_pwm(normalized);
+}
+
+std::uint16_t throttle_to_pwm(double throttle) {
+    if (!std::isfinite(throttle)) {
+        return fc::rc::DRONE_MIN;
+    }
+
+    if (throttle >= 0.0 && throttle <= 1.0) {
+        const double pwm = static_cast<double>(fc::rc::DRONE_MIN) +
+                           throttle * static_cast<double>(fc::rc::DRONE_MAX - fc::rc::DRONE_MIN);
+        return static_cast<std::uint16_t>(std::lround(std::clamp(
+            pwm, static_cast<double>(fc::rc::DRONE_MIN), static_cast<double>(fc::rc::DRONE_MAX))));
+    }
+
+    return static_cast<std::uint16_t>(std::lround(std::clamp(
+        throttle, static_cast<double>(fc::rc::DRONE_MIN), static_cast<double>(fc::rc::DRONE_MAX))));
+}
+
+void apply_setpoint_overrides(const fc::CommandFrame& cmd, fc::FlightController& controller) {
+    const fc::CommandSetpoints& setpoints = cmd.setpoints;
+    if (!setpoints.has_roll && !setpoints.has_pitch && !setpoints.has_yaw_rate &&
+        !setpoints.has_throttle) {
+        return;
+    }
+
+    fc::BetaFlightCommand command = controller.getCurrentCommand();
+    if (setpoints.has_roll) {
+        command.roll = normalized_axis_to_pwm(setpoints.roll);
+    }
+    if (setpoints.has_pitch) {
+        command.pitch = normalized_axis_to_pwm(setpoints.pitch);
+    }
+    if (setpoints.has_yaw_rate) {
+        command.yaw = yaw_rate_to_pwm(setpoints.yaw_rate);
+    }
+    if (setpoints.has_throttle) {
+        command.throttle = throttle_to_pwm(setpoints.throttle);
+    }
+
+    controller.setManualSetpoints(command);
+}
+
+std::string build_tel_json(uint64_t seq, const fc::TelemetryData& telemetry,
+                           const fc::TrackingMessage& tracking_message, double cmd_age_s) {
     double target_x = 0.0;
     double target_y = 0.0;
     double bound_w = 0.0;
     double bound_h = 0.0;
     double confidence = 0.0;
 
-    if (tracking_state == kTrackingStateTracking) {
-        // Tracking values will be wired from vision in a later PR.
-        target_x = 0.0;
-        target_y = 0.0;
-        bound_w = 0.0;
-        bound_h = 0.0;
-        confidence = 0.0;
+    if (telemetry.tracking_state == fc::TrackingState::Tracking) {
+        target_x = clamp_target_coord(tracking_message.target_x);
+        target_y = clamp_target_coord(tracking_message.target_y);
+        bound_w = clamp_unit(tracking_message.bound_w);
+        bound_h = clamp_unit(tracking_message.bound_h);
+        confidence = clamp_unit(tracking_message.confidence);
     }
 
     std::ostringstream oss;
@@ -50,12 +141,13 @@ std::string build_tel_json(uint64_t seq, int control_mode, int tracking_state) {
     oss << "{"
         << "\"type\":\"TEL\","
         << "\"seq\":" << seq << ","
-        << "\"timestamp_s\":" << monotonic_now_s() << ","
-        << "\"control_mode\":" << control_mode << ","
-        << "\"tracking_state\":" << tracking_state << ","
-        << "\"distFront_m\":0.0,"
-        << "\"distBack_m\":0.0,"
-        << "\"distBottom_m\":0.0,"
+        << "\"timestamp_s\":" << telemetry.timestamp_s << ","
+        << "\"control_mode\":" << static_cast<int>(telemetry.control_mode) << ","
+        << "\"cmd_age_s\":" << cmd_age_s << ","
+        << "\"tracking_state\":" << static_cast<int>(telemetry.tracking_state) << ","
+        << "\"distFront_m\":" << telemetry.distFront_m << ","
+        << "\"distBack_m\":" << telemetry.distBack_m << ","
+        << "\"distBottom_m\":" << telemetry.distBottom_m << ","
         << "\"target_x\":" << target_x << ","
         << "\"target_y\":" << target_y << ","
         << "\"bound_w\":" << bound_w << ","
@@ -84,40 +176,70 @@ int main() {
         return 1;
     }
 
+    fc::FlightController flight_controller;
+    flight_controller.setControlMode(fc::ControlMode::LandSafely);
+
     std::cout << "[FC] fc_app running. CMD TCP:" << proto::TCP_CMD_PORT
               << " TEL UDP:127.0.0.1:" << proto::UDP_TEL_PORT << "\n";
 
-    int control_mode = kControlModeLandSafely;
-    int tracking_state = kTrackingStateSearching;
     int last_cmd_seq = -1;
     uint64_t tel_seq = 0;
 
     const auto period = std::chrono::milliseconds(1000 / kTelHz);
     auto next_tick = std::chrono::steady_clock::now();
+    auto last_tick = next_tick;
 
     while (g_running.load()) {
+        const auto now = std::chrono::steady_clock::now();
+        const double dt = std::chrono::duration<double>(now - last_tick).count();
+        last_tick = now;
+
         fc::CommandFrame cmd;
         if (command_server.latest_command(cmd) && cmd.seq != last_cmd_seq) {
             last_cmd_seq = cmd.seq;
-            control_mode = cmd.desired_mode;
-            std::cout << "[FC] Applied desired_mode=" << control_mode << " from CMD seq=" << cmd.seq
+
+            fc::ControlMode desired_mode = fc::ControlMode::LandSafely;
+            if (to_control_mode(cmd.desired_mode, desired_mode)) {
+                flight_controller.setControlMode(desired_mode);
+            } else {
+                flight_controller.setControlMode(fc::ControlMode::LandSafely);
+            }
+
+            if (cmd.has_arm) {
+                flight_controller.setArm(cmd.arm);
+            }
+            apply_setpoint_overrides(cmd, flight_controller);
+
+            std::cout << "[FC] Applied CMD seq=" << cmd.seq << " desired_mode=" << cmd.desired_mode
                       << "\n";
         }
 
-        if (command_server.seconds_since_last_cmd() > proto::CMD_TIMEOUT_S) {
-            control_mode = kControlModeLandSafely;
+        const double cmd_age_s = command_server.seconds_since_last_cmd();
+        if (cmd_age_s > proto::CMD_TIMEOUT_S) {
+            flight_controller.setControlMode(fc::ControlMode::LandSafely);
         }
 
-        const std::string tel_json = build_tel_json(tel_seq, control_mode, tracking_state);
+        (void)flight_controller.updateTimeStep(dt);
+
+        const fc::TelemetryData& telemetry = flight_controller.getTelemetryData();
+        const fc::TrackingMessage& tracking_message = flight_controller.getLastTrackingMessage();
+
+        const std::string tel_json =
+            build_tel_json(tel_seq, telemetry, tracking_message, cmd_age_s);
         telemetry_publisher.send_json(tel_json);
 
         if ((tel_seq % 25U) == 0U) {
-            std::cout << "[FC] TEL seq=" << tel_seq << " mode=" << control_mode
-                      << " tracking_state=" << tracking_state << "\n";
+            std::cout << "[FC] TEL seq=" << tel_seq
+                      << " mode=" << static_cast<int>(telemetry.control_mode)
+                      << " tracking_state=" << static_cast<int>(telemetry.tracking_state) << "\n";
         }
         ++tel_seq;
 
         next_tick += period;
+        const auto post_send = std::chrono::steady_clock::now();
+        if (next_tick < post_send) {
+            next_tick = post_send;
+        }
         std::this_thread::sleep_until(next_tick);
     }
 

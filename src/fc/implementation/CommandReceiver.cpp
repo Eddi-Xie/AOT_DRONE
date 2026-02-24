@@ -41,7 +41,7 @@ bool parse_json_string_field(const std::string& json, const char* key, std::stri
         return false;
     }
 
-    ++i; // consume opening quote
+    ++i;
     std::string value;
     while (i < json.size()) {
         const char c = json[i];
@@ -50,7 +50,6 @@ bool parse_json_string_field(const std::string& json, const char* key, std::stri
             return true;
         }
         if (c == '\\') {
-            // Keep parser minimal: reject escaped strings for required fields.
             return false;
         }
         value.push_back(c);
@@ -116,6 +115,33 @@ bool parse_json_number_token(const std::string& json, const char* key, std::stri
     return true;
 }
 
+bool parse_json_bool_field(const std::string& json, const char* key, bool& out_value) {
+    size_t i = 0;
+    if (!find_key(json, key, i)) {
+        return false;
+    }
+
+    if ((i + 4) <= json.size() && json.compare(i, 4, "true") == 0) {
+        const size_t end_pos = i + 4;
+        if (end_pos == json.size() || json[end_pos] == ',' || json[end_pos] == '}' ||
+            json[end_pos] == ']' || std::isspace(static_cast<unsigned char>(json[end_pos]))) {
+            out_value = true;
+            return true;
+        }
+    }
+
+    if ((i + 5) <= json.size() && json.compare(i, 5, "false") == 0) {
+        const size_t end_pos = i + 5;
+        if (end_pos == json.size() || json[end_pos] == ',' || json[end_pos] == '}' ||
+            json[end_pos] == ']' || std::isspace(static_cast<unsigned char>(json[end_pos]))) {
+            out_value = false;
+            return true;
+        }
+    }
+
+    return false;
+}
+
 bool parse_double(const std::string& token, double& out_value) {
     errno = 0;
     char* end = nullptr;
@@ -149,6 +175,36 @@ bool parse_int_like(const std::string& token, int& out_value) {
     return true;
 }
 
+bool parse_optional_number(const std::string& json, const char* key, bool& out_has,
+                           double& out_value) {
+    std::string token;
+    if (!parse_json_number_token(json, key, token)) {
+        out_has = false;
+        return true;
+    }
+
+    double parsed_value = 0.0;
+    if (!parse_double(token, parsed_value)) {
+        return false;
+    }
+
+    out_has = true;
+    out_value = parsed_value;
+    return true;
+}
+
+bool parse_optional_bool(const std::string& json, const char* key, bool& out_has, bool& out_value) {
+    bool parsed = false;
+    if (!parse_json_bool_field(json, key, parsed)) {
+        out_has = false;
+        return true;
+    }
+
+    out_has = true;
+    out_value = parsed;
+    return true;
+}
+
 } // namespace
 
 namespace fc {
@@ -173,6 +229,20 @@ bool parse_cmd_frame(const std::string& json, CommandFrame& out) {
         !parse_int_like(mode_token, parsed.desired_mode)) {
         return false;
     }
+
+    if (!parse_optional_bool(json, "arm", parsed.has_arm, parsed.arm)) {
+        return false;
+    }
+
+    if (!parse_optional_number(json, "roll", parsed.setpoints.has_roll, parsed.setpoints.roll) ||
+        !parse_optional_number(json, "pitch", parsed.setpoints.has_pitch, parsed.setpoints.pitch) ||
+        !parse_optional_number(json, "yaw_rate", parsed.setpoints.has_yaw_rate,
+                               parsed.setpoints.yaw_rate) ||
+        !parse_optional_number(json, "throttle", parsed.setpoints.has_throttle,
+                               parsed.setpoints.throttle)) {
+        return false;
+    }
+
     parsed.raw_json = json;
     out = parsed;
     return true;
