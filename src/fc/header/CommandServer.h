@@ -1,5 +1,8 @@
 #pragma once
+#include "CommandReceiver.h"
+
 #include <atomic>
+#include <mutex>
 #include <string>
 
 namespace fc {
@@ -10,10 +13,13 @@ class CommandServer {
     bool start();
     void stop();
 
-    // Latest command JSON frame
+    // Latest valid command JSON frame
     std::string last_cmd_json() const;
 
-    // Seconds since last valid frame (monotonic wall-time in seconds)
+    // Latest parsed valid command.
+    bool latest_command(CommandFrame& out_cmd) const;
+
+    // Seconds since last valid command frame (monotonic time in seconds).
     double seconds_since_last_cmd() const;
 
   private:
@@ -22,8 +28,11 @@ class CommandServer {
     int client_fd_ = -1;
 
     std::atomic<bool> running_{false};
-    mutable std::string last_json_;
-    std::atomic<double> last_cmd_time_s_{0.0};
+    mutable std::mutex cmd_mutex_;
+    std::string last_json_;
+    CommandFrame last_cmd_;
+    bool has_cmd_{false};
+    std::atomic<double> last_cmd_time_s_{-1.0};
 
     void run_loop();
 };
