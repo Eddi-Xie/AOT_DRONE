@@ -84,6 +84,48 @@ A successful build confirms:
 
 ---
 
+## PR4 Verification (FC Protocol)
+
+PR4 adds a runnable FC executable (`fc_app`) that listens for TCP commands and publishes UDP telemetry.
+
+Build `fc_app`:
+
+```bash
+cmake -S . -B build
+cmake --build build -j
+```
+
+Run `fc_app` (terminal 1):
+
+```bash
+./build/src/fc/fc_app
+```
+
+Listen to telemetry (terminal 2):
+
+```bash
+python scripts/dev/listen_tel.py
+```
+
+Send commands (terminal 3):
+
+```bash
+python scripts/dev/send_cmd.py 1 --repeat-hz 50 --burst-seconds 0.6
+```
+
+Expected behavior:
+- Telemetry is published continuously at ~50 Hz on UDP `127.0.0.1:9001`.
+- While CMD frames are received, telemetry `control_mode` follows `desired_mode` (for example `1`).
+- When CMD frames stop for more than `CMD_TIMEOUT_S` (`0.5s`), telemetry falls back to `control_mode=2` (`LandSafely`).
+
+Optional one-shot smoke check (requires `fc_app` running):
+
+```bash
+python scripts/dev/fc_protocol_smoke.py
+```
+
+---
+
 ## Continuous Integration (CI)
 
 GitHub Actions runs the following on every push and pull request:
