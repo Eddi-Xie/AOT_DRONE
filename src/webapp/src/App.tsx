@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "r
 import { getBackendConfig, postIntent } from "./api";
 import ControlPanel from "./components/ControlPanel";
 import TelemetryPanel from "./components/TelemetryPanel";
+import VideoPanel from "./components/VideoPanel";
 import Warnings from "./components/Warnings";
 import {
   ControlMode,
@@ -19,6 +20,7 @@ import {
   formatNumber,
   toControlModeName,
 } from "./types";
+import { runOverlayMathDevAssertions } from "./utils/overlayMathAssertions";
 import { ReconnectingWsClient } from "./ws";
 
 type IntentFeedbackKind = "idle" | "sending" | "success" | "error";
@@ -167,6 +169,12 @@ export default function App(): JSX.Element {
   const frameIdRef = useRef<number | null>(null);
   const intentInFlightRef = useRef(false);
   const lastDesiredModeRef = useRef<ControlMode>(ControlMode.Manual);
+
+  useEffect(() => {
+    if (import.meta.env.DEV && import.meta.env.VITE_DEBUG_OVERLAY === "1") {
+      runOverlayMathDevAssertions();
+    }
+  }, []);
 
   const flushPendingBatch = useCallback(() => {
     frameIdRef.current = null;
@@ -405,6 +413,7 @@ export default function App(): JSX.Element {
     state.latestTel?.control_mode !== undefined && state.latestTel?.control_mode !== null
       ? state.latestTel.control_mode
       : null;
+  const overlaySource = backendConfig.overlaySource;
 
   return (
     <div className="app-shell">
@@ -443,14 +452,23 @@ export default function App(): JSX.Element {
           onToggleArm={onToggleArm}
         />
 
-        <TelemetryPanel
-          linkStatus={state.linkStatus}
-          latestTel={state.latestTel}
-          latestVis={state.latestVis}
-          nowMs={nowMs}
-          linkUpdatedAtMs={state.linkUpdatedAtMs}
-          linkEnvelopeTimestampS={state.linkEnvelopeTimestampS}
-        />
+        <div className="right-column">
+          <VideoPanel
+            latestTel={state.latestTel}
+            latestVis={state.latestVis}
+            overlaySource={overlaySource}
+            videoUrl={backendConfig.videoUrl}
+          />
+
+          <TelemetryPanel
+            linkStatus={state.linkStatus}
+            latestTel={state.latestTel}
+            latestVis={state.latestVis}
+            nowMs={nowMs}
+            linkUpdatedAtMs={state.linkUpdatedAtMs}
+            linkEnvelopeTimestampS={state.linkEnvelopeTimestampS}
+          />
+        </div>
       </main>
     </div>
   );
