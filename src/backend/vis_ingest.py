@@ -5,7 +5,9 @@ import logging
 import socket
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from .state import SharedState
 from .vis_schema import VisValidationError, validate_vis_message
@@ -55,12 +57,16 @@ class VisUdpIngestor:
         max_bytes: int = 512,
         recv_timeout_s: float = 0.1,
         log_interval_s: float = 5.0,
+        on_valid: Callable[[dict[str, Any], float], None] | None = None,
+        on_drop: Callable[[str, str], None] | None = None,
     ) -> None:
         self.state = state
         self.bind_host = bind_host
         self.port = port
         self.max_bytes = max_bytes
         self.recv_timeout_s = recv_timeout_s
+        self.on_valid = on_valid
+        self.on_drop = on_drop
         self._sock: socket.socket | None = None
         self._sock_lock = threading.Lock()
         self._drop_logger = _DropReasonLogger(min_interval_s=log_interval_s)
@@ -103,19 +109,22 @@ class VisUdpIngestor:
         self.state.record_vis_rx_total()
 
         if len(data) > self.max_bytes:
+            detail = f"datagram length={len(data)} exceeds max_bytes={self.max_bytes}"
             self.state.record_vis_drop("oversize")
-            self._drop_logger.log(
-                "oversize",
-                f"datagram length={len(data)} exceeds max_bytes={self.max_bytes}",
-            )
+            self._drop_logger.log("oversize", detail)
+            if self.on_drop is not None:
+                self.on_drop("oversize", detail)
             return False
 
         try:
             decoded = data.decode("utf-8")
             payload = json.loads(decoded)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            detail = str(exc)
             self.state.record_vis_drop("json")
-            self._drop_logger.log("json", str(exc))
+            self._drop_logger.log("json", detail)
+            if self.on_drop is not None:
+                self.on_drop("json", detail)
             return False
 
         try:
@@ -123,8 +132,12 @@ class VisUdpIngestor:
         except VisValidationError as exc:
             self.state.record_vis_drop(exc.reason)
             self._drop_logger.log(exc.reason, exc.detail)
+            if self.on_drop is not None:
+                self.on_drop(exc.reason, exc.detail)
             return False
 
         rx_s = rx_monotonic_s if rx_monotonic_s is not None else time.monotonic()
         self.state.record_vis_ok(validated, rx_monotonic_s=rx_s)
+        if self.on_valid is not None:
+            self.on_valid(validated, rx_s)
         return True
