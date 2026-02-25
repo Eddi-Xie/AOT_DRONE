@@ -47,6 +47,7 @@ python -m pre_commit install
 Run all checks manually (this mirrors what CI runs).
 
 ```bash
+python -m ruff check src tests
 python -m pre_commit run --all-files
 ```
 
@@ -62,7 +63,7 @@ The repository includes reproducible helper scripts:
 ./scripts/dev/runall.sh
 ```
 
-`runall.sh` installs pinned dependencies, runs lint/tests, and verifies the C++ build.
+`runall.sh` installs pinned dependencies, checks that `ruff` is available, runs lint/tests, and verifies the C++ build.
 
 ---
 
@@ -135,6 +136,10 @@ GitHub Actions runs the following on every push and pull request:
 - Python test discovery using pytest
 
 If CI fails, the failure should be reproducible locally using the commands above.
+
+Socket integration note:
+- Keep at least one CI environment that can bind local UDP sockets so ingest loop tests execute without being skipped.
+- In CI we enforce this with `REQUIRE_UDP_BIND_TESTS=1` for pytest.
 
 ---
 

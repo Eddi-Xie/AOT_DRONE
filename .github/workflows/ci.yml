@@ -44,4 +44,6 @@ jobs:
         run: cmake --build build -j
 
       - name: Python tests
+        env:
+          REQUIRE_UDP_BIND_TESTS: "1"
         run: pytest -q
