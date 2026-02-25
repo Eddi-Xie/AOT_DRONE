@@ -19,8 +19,10 @@ class SharedState:
     lock: Lock = field(default_factory=Lock)
     latest_tel: dict[str, Any] | None = None
     latest_vis: dict[str, Any] | None = None
+    latest_intent: dict[str, Any] | None = None
     tel_seq: int = -1
     vis_seq: int = -1
+    intent_last_update_monotonic_s: float | None = None
     vis_rx_total: int = 0
     vis_rx_ok: int = 0
     vis_rx_bad: int = 0
@@ -32,6 +34,19 @@ class SharedState:
     vis_last_seq: int = -1
     vis_last_timestamp_s: float | None = None
     vis_last_rx_monotonic_s: float | None = None
+    fc_connected: bool = False
+    fc_last_connect_attempt_s: float | None = None
+    cmd_tx_total: int = 0
+    cmd_tx_ok: int = 0
+    cmd_tx_fail: int = 0
+    cmd_last_sent_monotonic_s: float | None = None
+    cmd_hz_est: float = 0.0
+    tracking_blocked_reason: str | None = None
+    cmd_next_seq: int = field(default_factory=lambda: int(time.monotonic() * 1000.0))
+    last_cmd_seq: int | None = None
+    last_cmd_desired_mode: int | None = None
+    last_cmd_had_tracking: bool = False
+    last_cmd_bytes: int | None = None
 
     def update_tel(self, msg: dict[str, Any]) -> None:
         with self.lock:
@@ -40,6 +55,22 @@ class SharedState:
 
     def update_vis(self, msg: dict[str, Any]) -> None:
         self.record_vis_ok(msg=msg, rx_monotonic_s=time.monotonic())
+
+    def update_intent(
+        self,
+        intent: dict[str, Any],
+        update_monotonic_s: float | None = None,
+    ) -> None:
+        now_s = update_monotonic_s if update_monotonic_s is not None else time.monotonic()
+        with self.lock:
+            self.latest_intent = dict(intent)
+            self.intent_last_update_monotonic_s = float(now_s)
+
+    def get_latest_intent(self) -> dict[str, Any] | None:
+        with self.lock:
+            if self.latest_intent is None:
+                return None
+            return dict(self.latest_intent)
 
     def record_vis_rx_total(self) -> None:
         with self.lock:
@@ -61,6 +92,83 @@ class SharedState:
         with self.lock:
             self.vis_rx_bad += 1
             setattr(self, attr, getattr(self, attr) + 1)
+
+    def record_fc_connect_attempt(self, attempt_monotonic_s: float | None = None) -> None:
+        now_s = attempt_monotonic_s if attempt_monotonic_s is not None else time.monotonic()
+        with self.lock:
+            self.fc_last_connect_attempt_s = float(now_s)
+
+    def set_fc_connected(self, connected: bool) -> None:
+        with self.lock:
+            self.fc_connected = bool(connected)
+
+    def set_tracking_blocked_reason(self, reason: str | None) -> None:
+        with self.lock:
+            self.tracking_blocked_reason = reason
+
+    def record_cmd_tx_attempt(self) -> None:
+        with self.lock:
+            self.cmd_tx_total += 1
+
+    def record_cmd_tx_ok(self, sent_monotonic_s: float | None = None) -> None:
+        now_s = sent_monotonic_s if sent_monotonic_s is not None else time.monotonic()
+        with self.lock:
+            self.cmd_tx_ok += 1
+            prev_sent_s = self.cmd_last_sent_monotonic_s
+            self.cmd_last_sent_monotonic_s = float(now_s)
+            if prev_sent_s is not None:
+                delta_s = now_s - prev_sent_s
+                if delta_s > 0:
+                    inst_hz = 1.0 / delta_s
+                    if self.cmd_hz_est <= 0.0:
+                        self.cmd_hz_est = inst_hz
+                    else:
+                        self.cmd_hz_est = (0.8 * self.cmd_hz_est) + (0.2 * inst_hz)
+
+    def record_cmd_tx_fail(self) -> None:
+        with self.lock:
+            self.cmd_tx_fail += 1
+
+    def reserve_cmd_seq(self, minimum: int | None = None) -> int:
+        with self.lock:
+            if minimum is not None and self.cmd_next_seq < minimum:
+                self.cmd_next_seq = int(minimum)
+            seq = self.cmd_next_seq
+            self.cmd_next_seq += 1
+            return seq
+
+    def ensure_cmd_seq_minimum(self, minimum: int) -> None:
+        with self.lock:
+            if self.cmd_next_seq < minimum:
+                self.cmd_next_seq = int(minimum)
+
+    def record_last_cmd_payload(self, payload: dict[str, Any], payload_bytes: int) -> None:
+        with self.lock:
+            seq = payload.get("seq")
+            desired_mode = payload.get("desired_mode")
+            self.last_cmd_seq = int(seq) if isinstance(seq, int) else None
+            self.last_cmd_desired_mode = (
+                int(desired_mode) if isinstance(desired_mode, int) else None
+            )
+            self.last_cmd_had_tracking = bool("tracking" in payload)
+            self.last_cmd_bytes = int(payload_bytes)
+
+    def get_cmd_bridge_status(self) -> dict[str, Any]:
+        with self.lock:
+            return {
+                "fc_connected": self.fc_connected,
+                "fc_last_connect_attempt_s": self.fc_last_connect_attempt_s,
+                "cmd_tx_total": self.cmd_tx_total,
+                "cmd_tx_ok": self.cmd_tx_ok,
+                "cmd_tx_fail": self.cmd_tx_fail,
+                "cmd_last_sent_monotonic_s": self.cmd_last_sent_monotonic_s,
+                "cmd_hz_est": self.cmd_hz_est,
+                "tracking_blocked_reason": self.tracking_blocked_reason,
+                "last_cmd_seq": self.last_cmd_seq,
+                "last_cmd_desired_mode": self.last_cmd_desired_mode,
+                "last_cmd_had_tracking": self.last_cmd_had_tracking,
+                "last_cmd_bytes": self.last_cmd_bytes,
+            }
 
     def get_latest_vis(self) -> dict[str, Any] | None:
         with self.lock:
@@ -133,6 +241,7 @@ class SharedState:
             return {
                 "tel": self.latest_tel,
                 "vis": self.latest_vis,
+                "intent": self.latest_intent,
                 "tel_seq": self.tel_seq,
                 "vis_seq": self.vis_seq,
                 "vis_stats": {
@@ -155,5 +264,19 @@ class SharedState:
                     "vis_rx_bad": self.vis_rx_bad,
                     "vis_last_seq": self.vis_last_seq,
                     "vis_last_timestamp_s": self.vis_last_timestamp_s,
+                },
+                "cmd_status": {
+                    "fc_connected": self.fc_connected,
+                    "fc_last_connect_attempt_s": self.fc_last_connect_attempt_s,
+                    "cmd_tx_total": self.cmd_tx_total,
+                    "cmd_tx_ok": self.cmd_tx_ok,
+                    "cmd_tx_fail": self.cmd_tx_fail,
+                    "cmd_last_sent_monotonic_s": self.cmd_last_sent_monotonic_s,
+                    "cmd_hz_est": self.cmd_hz_est,
+                    "tracking_blocked_reason": self.tracking_blocked_reason,
+                    "last_cmd_seq": self.last_cmd_seq,
+                    "last_cmd_desired_mode": self.last_cmd_desired_mode,
+                    "last_cmd_had_tracking": self.last_cmd_had_tracking,
+                    "last_cmd_bytes": self.last_cmd_bytes,
                 },
             }

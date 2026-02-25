@@ -191,6 +191,8 @@ Optional fields (expand later):
 
 Backend behavior:
 - Backend should resend the latest CMD at a fixed rate (20–50 Hz) while connected.
+- Backend may override requested `desired_mode=Tracking` to `desired_mode=LandSafely` if VIS is
+  missing or stale (backend-side safety gate).
 
 Example:
 {
