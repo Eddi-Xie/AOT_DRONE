@@ -32,6 +32,10 @@ export default defineConfig(({ mode }) => {
           ws: true,
           changeOrigin: true,
         },
+        "/video": {
+          target: proxyTarget,
+          changeOrigin: true,
+        },
       },
     },
   };

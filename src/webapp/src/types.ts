@@ -13,6 +13,7 @@ export enum TrackingState {
 }
 
 export type WarningSeverity = "info" | "warn" | "error";
+export type OverlaySource = "VIS" | "TEL";
 
 export type WsEventType = "TEL_UPDATE" | "VIS_UPDATE" | "LINK_STATUS" | "WARNING";
 
@@ -112,6 +113,8 @@ export interface IntentRequest {
 export interface BackendConfig {
   httpUrl: string;
   wsUrl: string;
+  videoUrl: string;
+  overlaySource: OverlaySource;
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
