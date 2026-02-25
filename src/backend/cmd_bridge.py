@@ -63,6 +63,8 @@ class CmdBridge:
         seq_start: int | None = None,
         clock: Callable[[], float] | None = None,
         wait_fn: Callable[[threading.Event, float], None] | None = None,
+        on_connection_change: Callable[[bool], None] | None = None,
+        on_tracking_blocked: Callable[[str], None] | None = None,
     ) -> None:
         if tick_hz <= 0:
             raise ValueError("tick_hz must be > 0")
@@ -97,8 +99,12 @@ class CmdBridge:
         self._clock = clock or time.monotonic
         self._wait_fn = wait_fn or self._default_wait
         self._log_limiter = _BridgeReasonLogger(min_interval_s=log_interval_s, now_fn=self._clock)
+        self._on_connection_change = on_connection_change
+        self._on_tracking_blocked = on_tracking_blocked
         self._next_connect_attempt_s = 0.0
         self._connect_backoff_s = self.connect_backoff_initial_s
+        self._last_fc_connected = False
+        self._last_tracking_blocked_reason: str | None = None
         if seq_start is not None:
             self._state.ensure_cmd_seq_minimum(seq_start)
 
@@ -114,11 +120,11 @@ class CmdBridge:
         self._close_socket()
         if self._thread is not None:
             self._thread.join(timeout=join_timeout_s)
-        self._state.set_fc_connected(False)
+        self._set_fc_connected(False)
 
     def run_forever(self) -> None:
         period_s = 1.0 / self.tick_hz
-        self._state.set_fc_connected(False)
+        self._set_fc_connected(False)
         while not self._stop_event.is_set():
             loop_start_s = self._clock()
             if self._get_socket() is None:
@@ -131,7 +137,7 @@ class CmdBridge:
             self._wait_fn(self._stop_event, remaining_s)
 
         self._close_socket()
-        self._state.set_fc_connected(False)
+        self._set_fc_connected(False)
 
     def _attempt_connect(self, now_s: float) -> None:
         if now_s < self._next_connect_attempt_s:
@@ -144,7 +150,7 @@ class CmdBridge:
             sock.connect((self.fc_host, self.fc_port))
         except OSError as exc:
             sock.close()
-            self._state.set_fc_connected(False)
+            self._set_fc_connected(False)
             self._next_connect_attempt_s = now_s + self._connect_backoff_s
             self._connect_backoff_s = min(self._connect_backoff_s * 2.0, self.connect_backoff_max_s)
             self._log_limiter.log(
@@ -156,7 +162,7 @@ class CmdBridge:
         sock.settimeout(None)
         with self._sock_lock:
             self._sock = sock
-        self._state.set_fc_connected(True)
+        self._set_fc_connected(True)
         self._connect_backoff_s = self.connect_backoff_initial_s
         self._next_connect_attempt_s = now_s
 
@@ -175,6 +181,7 @@ class CmdBridge:
             vis_fresh_s=self.vis_fresh_s,
         )
         self._state.set_tracking_blocked_reason(blocked_reason)
+        self._emit_tracking_blocked_callback(blocked_reason)
         self._state.record_cmd_tx_attempt()
 
         try:
@@ -187,7 +194,7 @@ class CmdBridge:
         sock = self._get_socket()
         if sock is None:
             self._state.record_cmd_tx_fail()
-            self._state.set_fc_connected(False)
+            self._set_fc_connected(False)
             self._next_connect_attempt_s = now_s
             return
 
@@ -195,7 +202,7 @@ class CmdBridge:
             sock.sendall(frame)
         except OSError as exc:
             self._state.record_cmd_tx_fail()
-            self._state.set_fc_connected(False)
+            self._set_fc_connected(False)
             self._close_socket()
             self._next_connect_attempt_s = now_s + self._connect_backoff_s
             self._connect_backoff_s = min(self._connect_backoff_s * 2.0, self.connect_backoff_max_s)
@@ -203,6 +210,32 @@ class CmdBridge:
             return
 
         self._state.record_cmd_tx_ok(sent_monotonic_s=now_s)
+
+    def _set_fc_connected(self, connected: bool) -> None:
+        self._state.set_fc_connected(connected)
+        if connected == self._last_fc_connected:
+            return
+        self._last_fc_connected = connected
+        if self._on_connection_change is None:
+            return
+        try:
+            self._on_connection_change(connected)
+        except Exception:
+            LOGGER.exception("CMD bridge connection callback failed")
+
+    def _emit_tracking_blocked_callback(self, blocked_reason: str | None) -> None:
+        if blocked_reason is None:
+            self._last_tracking_blocked_reason = None
+            return
+        if blocked_reason == self._last_tracking_blocked_reason:
+            return
+        self._last_tracking_blocked_reason = blocked_reason
+        if self._on_tracking_blocked is None:
+            return
+        try:
+            self._on_tracking_blocked(blocked_reason)
+        except Exception:
+            LOGGER.exception("CMD bridge tracking-blocked callback failed")
 
     def _get_socket(self) -> socket.socket | None:
         with self._sock_lock:
