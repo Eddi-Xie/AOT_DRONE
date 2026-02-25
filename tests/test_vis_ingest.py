@@ -1,4 +1,5 @@
 import json
+import os
 import socket
 import threading
 import time
@@ -50,6 +51,7 @@ def test_vis_ingest_process_datagram_counts_reasons() -> None:
     assert stats["vis_last_timestamp_s"] == 11.0
 
 
+@pytest.mark.integration
 def test_vis_udp_ingest_loop_accepts_datagram_when_udp_allowed() -> None:
     _require_udp_bind_or_skip()
 
@@ -110,4 +112,6 @@ def _require_udp_bind_or_skip() -> None:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
             probe.bind(("127.0.0.1", 0))
     except OSError as exc:
+        if os.environ.get("REQUIRE_UDP_BIND_TESTS", "").strip().lower() in {"1", "true", "yes"}:
+            raise AssertionError(f"UDP socket bind required but unavailable: {exc}") from exc
         pytest.skip(f"UDP socket bind unavailable in test environment: {exc}")

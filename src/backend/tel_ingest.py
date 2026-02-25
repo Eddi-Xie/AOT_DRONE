@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .state import SharedState
-from .vis_schema import VisValidationError, validate_vis_message
+from .tel_schema import TelValidationError, validate_tel_message
 
 LOGGER = logging.getLogger(__name__)
 
@@ -42,19 +42,19 @@ class _DropReasonLogger:
             if bucket.suppressed:
                 suffix = f" (suppressed={bucket.suppressed})"
                 bucket.suppressed = 0
-            LOGGER.warning("Dropped VIS packet [%s]: %s%s", reason, detail, suffix)
+            LOGGER.warning("Dropped TEL packet [%s]: %s%s", reason, detail, suffix)
             bucket.last_log_monotonic_s = now_s
         else:
             bucket.suppressed += 1
 
 
-class VisUdpIngestor:
+class TelUdpIngestor:
     def __init__(
         self,
         state: SharedState,
         bind_host: str = "127.0.0.1",
-        port: int = 9003,
-        max_bytes: int = 512,
+        port: int = 9001,
+        max_bytes: int = 1024,
         recv_timeout_s: float = 0.1,
         log_interval_s: float = 5.0,
         on_valid: Callable[[dict[str, Any], float], None] | None = None,
@@ -106,11 +106,11 @@ class VisUdpIngestor:
                 self._sock = None
 
     def process_datagram(self, data: bytes, rx_monotonic_s: float | None = None) -> bool:
-        self.state.record_vis_rx_total()
+        self.state.record_tel_rx_total()
 
         if len(data) > self.max_bytes:
             detail = f"datagram length={len(data)} exceeds max_bytes={self.max_bytes}"
-            self.state.record_vis_drop("oversize")
+            self.state.record_tel_drop("oversize")
             self._drop_logger.log("oversize", detail)
             if self.on_drop is not None:
                 self.on_drop("oversize", detail)
@@ -121,23 +121,23 @@ class VisUdpIngestor:
             payload = json.loads(decoded)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             detail = str(exc)
-            self.state.record_vis_drop("json")
+            self.state.record_tel_drop("json")
             self._drop_logger.log("json", detail)
             if self.on_drop is not None:
                 self.on_drop("json", detail)
             return False
 
         try:
-            validated = validate_vis_message(payload)
-        except VisValidationError as exc:
-            self.state.record_vis_drop(exc.reason)
+            validated = validate_tel_message(payload)
+        except TelValidationError as exc:
+            self.state.record_tel_drop(exc.reason)
             self._drop_logger.log(exc.reason, exc.detail)
             if self.on_drop is not None:
                 self.on_drop(exc.reason, exc.detail)
             return False
 
         rx_s = rx_monotonic_s if rx_monotonic_s is not None else time.monotonic()
-        self.state.record_vis_ok(validated, rx_monotonic_s=rx_s)
+        self.state.record_tel_ok(validated, rx_monotonic_s=rx_s)
         if self.on_valid is not None:
             self.on_valid(validated, rx_s)
         return True

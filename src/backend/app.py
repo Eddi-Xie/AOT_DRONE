@@ -1,13 +1,20 @@
+from __future__ import annotations
+
+import asyncio
 import os
 import threading
+import time
+from collections.abc import Callable
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
+from .broadcast import BackendBroadcaster
 from .cmd_bridge import CmdBridge
 from .cmd_schema import CONTROL_MODES
 from .protocol_constants import (
+    CMD_TIMEOUT_S,
     TCP_CMD_PORT,
     TCP_MAX_FRAME_BYTES,
     UDP_MAX_TEL_BYTES,
@@ -16,15 +23,27 @@ from .protocol_constants import (
     UDP_VIS_PORT,
 )
 from .state import SharedState
-from .udp_ingest import start_udp_receiver
+from .tel_ingest import TelUdpIngestor
 from .vis_ingest import VisUdpIngestor
+from .ws_manager import WsManager
 
 app = FastAPI()
 state = SharedState()
+
+_tel_stop_event = threading.Event()
 _vis_stop_event = threading.Event()
+
+_tel_ingestor: TelUdpIngestor | None = None
 _vis_ingestor: VisUdpIngestor | None = None
+_tel_thread: threading.Thread | None = None
 _vis_thread: threading.Thread | None = None
 _cmd_bridge: CmdBridge | None = None
+_ws_manager: WsManager | None = None
+_broadcaster: BackendBroadcaster | None = None
+
+_runtime_vis_fresh_s = 0.25
+_runtime_cmd_hz = 50.0
+_runtime_tel_hz = 50.0
 
 
 class IntentRequest(BaseModel):
@@ -33,42 +52,114 @@ class IntentRequest(BaseModel):
     setpoints: dict[str, float] | None = None
 
 
-def _tel_handler(msg: dict) -> None:
-    if msg.get("type") == "TEL":
-        state.update_tel(msg)
-
-
 @app.on_event("startup")
 def startup() -> None:
-    global _cmd_bridge, _vis_ingestor, _vis_thread
-    threading.Thread(
-        target=start_udp_receiver,
-        args=("127.0.0.1", UDP_TEL_PORT, UDP_MAX_TEL_BYTES, _tel_handler),
-        daemon=True,
-    ).start()
+    global _broadcaster, _cmd_bridge, _tel_ingestor, _tel_thread, _vis_ingestor, _vis_thread
+    global _ws_manager, _runtime_cmd_hz, _runtime_tel_hz, _runtime_vis_fresh_s
 
-    _vis_ingestor = _build_vis_ingestor_from_env()
-    _vis_stop_event.clear()
-    _vis_thread = threading.Thread(
-        target=_vis_ingestor.serve_forever,
-        args=(_vis_stop_event,),
-        daemon=True,
+    state.reset()
+    _runtime_cmd_hz = _read_env_float("BACKEND_CMD_HZ", 50.0)
+    _runtime_tel_hz = _read_env_float("BACKEND_TEL_HZ_NOMINAL", 50.0)
+    _runtime_vis_fresh_s = _read_env_float("BACKEND_VIS_FRESH_S", 0.25)
+
+    _ws_manager = WsManager(queue_max=_read_env_int("BACKEND_WS_CLIENT_QUEUE_MAX", 10))
+    _broadcaster = BackendBroadcaster(
+        state=state,
+        ws_manager=_ws_manager,
+        tel_hz=_read_env_float("BACKEND_WS_TEL_HZ", 20.0),
+        vis_hz=_read_env_float("BACKEND_WS_VIS_HZ", 20.0),
+        link_hz=_read_env_float("BACKEND_WS_LINK_HZ", 2.0),
+        vis_fresh_s=_runtime_vis_fresh_s,
+        cmd_timeout_s=CMD_TIMEOUT_S,
+        cmd_hz_nominal=_runtime_cmd_hz,
+        tel_hz_nominal=_runtime_tel_hz,
+        warning_min_interval_s=_read_env_float("BACKEND_WS_WARNING_INTERVAL_S", 2.0),
     )
-    _vis_thread.start()
+    _broadcaster.start()
 
-    _cmd_bridge = _build_cmd_bridge_from_env()
-    _cmd_bridge.start()
+    _tel_ingestor = None
+    _tel_thread = None
+    if _read_env_bool("BACKEND_TEL_INGEST_ENABLED", True):
+        _tel_ingestor = _build_tel_ingestor_from_env(
+            on_valid=_broadcaster.on_tel_update,
+            on_drop=_broadcaster.on_tel_drop,
+        )
+        _tel_stop_event.clear()
+        _tel_thread = threading.Thread(
+            target=_tel_ingestor.serve_forever,
+            args=(_tel_stop_event,),
+            daemon=True,
+        )
+        _tel_thread.start()
+
+    _vis_ingestor = None
+    _vis_thread = None
+    if _read_env_bool("BACKEND_VIS_INGEST_ENABLED", True):
+        _vis_ingestor = _build_vis_ingestor_from_env(
+            on_valid=_broadcaster.on_vis_update,
+            on_drop=_broadcaster.on_vis_drop,
+        )
+        _vis_stop_event.clear()
+        _vis_thread = threading.Thread(
+            target=_vis_ingestor.serve_forever,
+            args=(_vis_stop_event,),
+            daemon=True,
+        )
+        _vis_thread.start()
+
+    _cmd_bridge = None
+    if _read_env_bool("BACKEND_CMD_BRIDGE_ENABLED", True):
+        _cmd_bridge = _build_cmd_bridge_from_env(
+            cmd_hz=_runtime_cmd_hz,
+            vis_fresh_s=_runtime_vis_fresh_s,
+            on_connection_change=_broadcaster.on_fc_connection_changed,
+            on_tracking_blocked=_broadcaster.on_tracking_blocked,
+        )
+        _cmd_bridge.start()
+
+    app.state.shared_state = state
+    app.state.ws_manager = _ws_manager
+    app.state.broadcaster = _broadcaster
+    app.state.tel_ingestor = _tel_ingestor
+    app.state.vis_ingestor = _vis_ingestor
+    app.state.cmd_bridge = _cmd_bridge
 
 
 @app.on_event("shutdown")
 def shutdown() -> None:
+    global _broadcaster, _cmd_bridge, _tel_ingestor, _tel_thread, _vis_ingestor, _vis_thread
+    global _ws_manager
+
     if _cmd_bridge is not None:
         _cmd_bridge.stop()
+        _cmd_bridge = None
+
+    _tel_stop_event.set()
+    if _tel_ingestor is not None:
+        _tel_ingestor.close()
+        _tel_ingestor = None
+    if _tel_thread is not None:
+        _tel_thread.join(timeout=1.0)
+        _tel_thread = None
+
     _vis_stop_event.set()
     if _vis_ingestor is not None:
         _vis_ingestor.close()
+        _vis_ingestor = None
     if _vis_thread is not None:
         _vis_thread.join(timeout=1.0)
+        _vis_thread = None
+
+    if _broadcaster is not None:
+        _broadcaster.stop(join_timeout_s=1.0)
+        _broadcaster = None
+    _ws_manager = None
+
+    app.state.ws_manager = None
+    app.state.broadcaster = None
+    app.state.tel_ingestor = None
+    app.state.vis_ingestor = None
+    app.state.cmd_bridge = None
 
 
 @app.get("/health")
@@ -98,44 +189,89 @@ def post_intent(intent_req: IntentRequest) -> dict[str, Any]:
 
 @app.get("/api/status")
 def api_status() -> dict[str, Any]:
+    status = state.get_link_status(
+        vis_fresh_s=_runtime_vis_fresh_s,
+        cmd_timeout_s=CMD_TIMEOUT_S,
+        cmd_hz=_runtime_cmd_hz,
+        tel_hz=_runtime_tel_hz,
+    )
     cmd_status = state.get_cmd_bridge_status()
-    vis_stats = state.get_vis_stats()
-    return {
-        "fc_connected": cmd_status["fc_connected"],
-        "fc_last_connect_attempt_s": cmd_status["fc_last_connect_attempt_s"],
-        "cmd_tx_total": cmd_status["cmd_tx_total"],
-        "cmd_tx_ok": cmd_status["cmd_tx_ok"],
-        "cmd_tx_fail": cmd_status["cmd_tx_fail"],
-        "cmd_last_sent_monotonic_s": cmd_status["cmd_last_sent_monotonic_s"],
-        "cmd_hz_est": cmd_status["cmd_hz_est"],
-        "vis_age_s": vis_stats["vis_age_s"],
-        "vis_rx_ok": vis_stats["vis_rx_ok"],
-        "vis_rx_bad": vis_stats["vis_rx_bad"],
-        "tracking_blocked_reason": cmd_status["tracking_blocked_reason"],
-        "last_cmd_payload": {
-            "last_cmd_seq": cmd_status["last_cmd_seq"],
-            "last_cmd_desired_mode": cmd_status["last_cmd_desired_mode"],
-            "last_cmd_had_tracking": cmd_status["last_cmd_had_tracking"],
-            "last_cmd_bytes": cmd_status["last_cmd_bytes"],
-        },
+    status["last_cmd_payload"] = {
+        "last_cmd_seq": cmd_status["last_cmd_seq"],
+        "last_cmd_desired_mode": cmd_status["last_cmd_desired_mode"],
+        "last_cmd_had_tracking": cmd_status["last_cmd_had_tracking"],
+        "last_cmd_bytes": cmd_status["last_cmd_bytes"],
     }
+    return status
 
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
     await ws.accept()
+
+    ws_manager = _ws_manager
+    broadcaster = _broadcaster
+    if ws_manager is None or broadcaster is None:
+        await ws.close(code=1011)
+        return
+
+    client_id = ws_manager.register(ws)
     try:
+        now_s = time.monotonic()
+        link_payload = broadcaster.build_link_status(now_monotonic_s=now_s)
+        await ws.send_json(
+            ws_manager.build_envelope("LINK_STATUS", link_payload, timestamp_s=now_s)
+        )
+
+        tel_payload = broadcaster.build_tel_update_data(now_monotonic_s=now_s)
+        if tel_payload is not None:
+            await ws.send_json(
+                ws_manager.build_envelope("TEL_UPDATE", tel_payload, timestamp_s=now_s)
+            )
+
+        vis_payload = broadcaster.build_vis_update_data(now_monotonic_s=now_s)
+        if vis_payload is not None:
+            await ws.send_json(
+                ws_manager.build_envelope("VIS_UPDATE", vis_payload, timestamp_s=now_s)
+            )
+
         while True:
-            await ws.send_json(state.snapshot())
-            await ws.receive_text()
-            await ws.send_text("ok")
+            envelope = ws_manager.pop_next(client_id)
+            if envelope is None:
+                await asyncio.sleep(0.02)
+                continue
+            await ws.send_json(envelope)
     except WebSocketDisconnect:
-        return
-    except Exception:
-        return
+        pass
+    finally:
+        ws_manager.unregister(client_id)
 
 
-def _build_vis_ingestor_from_env() -> VisUdpIngestor:
+def _build_tel_ingestor_from_env(
+    on_valid: Callable[[dict[str, Any], float], None] | None = None,
+    on_drop: Callable[[str, str], None] | None = None,
+) -> TelUdpIngestor:
+    host = os.environ.get("BACKEND_TEL_HOST", "127.0.0.1")
+    port = _read_env_int("BACKEND_TEL_PORT", UDP_TEL_PORT)
+    max_bytes = _read_env_int("BACKEND_TEL_MAX_BYTES", UDP_MAX_TEL_BYTES)
+    recv_timeout_s = _read_env_float("BACKEND_TEL_RECV_TIMEOUT_S", 0.1)
+    log_interval_s = _read_env_float("BACKEND_TEL_LOG_INTERVAL_S", 5.0)
+    return TelUdpIngestor(
+        state=state,
+        bind_host=host,
+        port=port,
+        max_bytes=max_bytes,
+        recv_timeout_s=recv_timeout_s,
+        log_interval_s=log_interval_s,
+        on_valid=on_valid,
+        on_drop=on_drop,
+    )
+
+
+def _build_vis_ingestor_from_env(
+    on_valid: Callable[[dict[str, Any], float], None] | None = None,
+    on_drop: Callable[[str, str], None] | None = None,
+) -> VisUdpIngestor:
     host = os.environ.get("BACKEND_VIS_HOST", "127.0.0.1")
     port = _read_env_int("BACKEND_VIS_PORT", UDP_VIS_PORT)
     max_bytes = _read_env_int("BACKEND_VIS_MAX_BYTES", UDP_MAX_VIS_BYTES)
@@ -148,14 +284,19 @@ def _build_vis_ingestor_from_env() -> VisUdpIngestor:
         max_bytes=max_bytes,
         recv_timeout_s=recv_timeout_s,
         log_interval_s=log_interval_s,
+        on_valid=on_valid,
+        on_drop=on_drop,
     )
 
 
-def _build_cmd_bridge_from_env() -> CmdBridge:
+def _build_cmd_bridge_from_env(
+    cmd_hz: float,
+    vis_fresh_s: float,
+    on_connection_change: Callable[[bool], None] | None = None,
+    on_tracking_blocked: Callable[[str], None] | None = None,
+) -> CmdBridge:
     fc_host = os.environ.get("BACKEND_FC_HOST", "127.0.0.1")
     fc_port = _read_env_int("BACKEND_FC_PORT", TCP_CMD_PORT)
-    cmd_hz = _read_env_float("BACKEND_CMD_HZ", 50.0)
-    vis_fresh_s = _read_env_float("BACKEND_VIS_FRESH_S", 0.25)
     max_payload_bytes = _read_env_int("BACKEND_CMD_MAX_PAYLOAD_BYTES", TCP_MAX_FRAME_BYTES)
     connect_timeout_s = _read_env_float("BACKEND_CMD_CONNECT_TIMEOUT_S", 1.0)
     backoff_initial_s = _read_env_float("BACKEND_CMD_BACKOFF_INITIAL_S", 1.0)
@@ -172,6 +313,8 @@ def _build_cmd_bridge_from_env() -> CmdBridge:
         connect_backoff_initial_s=backoff_initial_s,
         connect_backoff_max_s=backoff_max_s,
         log_interval_s=log_interval_s,
+        on_connection_change=on_connection_change,
+        on_tracking_blocked=on_tracking_blocked,
     )
 
 
@@ -187,3 +330,15 @@ def _read_env_float(name: str, default: float) -> float:
     if raw is None:
         return default
     return float(raw)
+
+
+def _read_env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"invalid boolean env var for {name}: {raw!r}")

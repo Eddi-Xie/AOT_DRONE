@@ -20,6 +20,16 @@ Monorepo for the drone control stack:
 - Pinned backend runtime deps: `src/backend/requirements.txt`
 - CI-equivalent local check command: `./scripts/dev/runall.sh`
 
+Install dependencies before running lint/tests:
+
+```bash
+python -m pip install --upgrade pip==24.3.1
+python -m pip install -r requirements-dev.txt
+python -m pip install -r src/backend/requirements.txt
+```
+
+`./scripts/dev/runall.sh` now checks `ruff` availability explicitly and exits with a clear error if dev tooling is missing.
+
 ## Vision Local Runner (PR-V1)
 Run the local vision scaffold (stub detector/tracker) with newline-delimited VIS JSON output:
 
@@ -34,6 +44,24 @@ Optional outputs:
 - `--vis-hz` uses monotonic time-based throttling (first frame emits immediately)
 
 Run vision/test commands from the repository root so `src.*` imports resolve consistently.
+
+## Backend WebSocket Stream (PR-B4)
+Backend exposes `GET /ws` with event envelopes:
+
+```json
+{
+  "ws_ver": 1,
+  "event": "TEL_UPDATE|VIS_UPDATE|LINK_STATUS|WARNING",
+  "data": {},
+  "timestamp_s": 123.456,
+  "seq": 42
+}
+```
+
+Throttling defaults (configurable with env vars):
+- `TEL_UPDATE`: capped at `BACKEND_WS_TEL_HZ` (default `20 Hz`)
+- `VIS_UPDATE`: capped at `BACKEND_WS_VIS_HZ` (default `20 Hz`)
+- `LINK_STATUS`: heartbeat at `BACKEND_WS_LINK_HZ` (default `2 Hz`)
 
 ## Current legacy message formats (to be standardized)
 
