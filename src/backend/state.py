@@ -5,6 +5,13 @@ from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any
 
+_TEL_DROP_REASON_ATTRS = {
+    "oversize": "tel_drop_reason_oversize",
+    "json": "tel_drop_reason_json",
+    "schema": "tel_drop_reason_schema",
+    "range": "tel_drop_reason_range",
+}
+
 _VIS_DROP_REASON_ATTRS = {
     "oversize": "vis_drop_reason_oversize",
     "json": "vis_drop_reason_json",
@@ -23,6 +30,18 @@ class SharedState:
     tel_seq: int = -1
     vis_seq: int = -1
     intent_last_update_monotonic_s: float | None = None
+
+    tel_rx_total: int = 0
+    tel_rx_ok: int = 0
+    tel_rx_bad: int = 0
+    tel_drop_reason_oversize: int = 0
+    tel_drop_reason_json: int = 0
+    tel_drop_reason_schema: int = 0
+    tel_drop_reason_range: int = 0
+    tel_last_seq: int = -1
+    tel_last_timestamp_s: float | None = None
+    tel_last_rx_monotonic_s: float | None = None
+
     vis_rx_total: int = 0
     vis_rx_ok: int = 0
     vis_rx_bad: int = 0
@@ -34,6 +53,7 @@ class SharedState:
     vis_last_seq: int = -1
     vis_last_timestamp_s: float | None = None
     vis_last_rx_monotonic_s: float | None = None
+
     fc_connected: bool = False
     fc_last_connect_attempt_s: float | None = None
     cmd_tx_total: int = 0
@@ -42,16 +62,61 @@ class SharedState:
     cmd_last_sent_monotonic_s: float | None = None
     cmd_hz_est: float = 0.0
     tracking_blocked_reason: str | None = None
+
     cmd_next_seq: int = field(default_factory=lambda: int(time.monotonic() * 1000.0))
     last_cmd_seq: int | None = None
     last_cmd_desired_mode: int | None = None
     last_cmd_had_tracking: bool = False
     last_cmd_bytes: int | None = None
 
-    def update_tel(self, msg: dict[str, Any]) -> None:
+    def reset(self) -> None:
         with self.lock:
-            self.latest_tel = msg
-            self.tel_seq = int(msg.get("seq", self.tel_seq))
+            self.latest_tel = None
+            self.latest_vis = None
+            self.latest_intent = None
+            self.tel_seq = -1
+            self.vis_seq = -1
+            self.intent_last_update_monotonic_s = None
+
+            self.tel_rx_total = 0
+            self.tel_rx_ok = 0
+            self.tel_rx_bad = 0
+            self.tel_drop_reason_oversize = 0
+            self.tel_drop_reason_json = 0
+            self.tel_drop_reason_schema = 0
+            self.tel_drop_reason_range = 0
+            self.tel_last_seq = -1
+            self.tel_last_timestamp_s = None
+            self.tel_last_rx_monotonic_s = None
+
+            self.vis_rx_total = 0
+            self.vis_rx_ok = 0
+            self.vis_rx_bad = 0
+            self.vis_drop_reason_oversize = 0
+            self.vis_drop_reason_json = 0
+            self.vis_drop_reason_schema = 0
+            self.vis_drop_reason_range = 0
+            self.vis_drop_reason_semantics = 0
+            self.vis_last_seq = -1
+            self.vis_last_timestamp_s = None
+            self.vis_last_rx_monotonic_s = None
+
+            self.fc_connected = False
+            self.fc_last_connect_attempt_s = None
+            self.cmd_tx_total = 0
+            self.cmd_tx_ok = 0
+            self.cmd_tx_fail = 0
+            self.cmd_last_sent_monotonic_s = None
+            self.cmd_hz_est = 0.0
+            self.tracking_blocked_reason = None
+            self.cmd_next_seq = int(time.monotonic() * 1000.0)
+            self.last_cmd_seq = None
+            self.last_cmd_desired_mode = None
+            self.last_cmd_had_tracking = False
+            self.last_cmd_bytes = None
+
+    def update_tel(self, msg: dict[str, Any]) -> None:
+        self.record_tel_ok(msg=msg, rx_monotonic_s=time.monotonic())
 
     def update_vis(self, msg: dict[str, Any]) -> None:
         self.record_vis_ok(msg=msg, rx_monotonic_s=time.monotonic())
@@ -72,13 +137,34 @@ class SharedState:
                 return None
             return dict(self.latest_intent)
 
+    def record_tel_rx_total(self) -> None:
+        with self.lock:
+            self.tel_rx_total += 1
+
+    def record_tel_ok(self, msg: dict[str, Any], rx_monotonic_s: float) -> None:
+        with self.lock:
+            self.latest_tel = dict(msg)
+            self.tel_seq = int(msg.get("seq", self.tel_seq))
+            self.tel_rx_ok += 1
+            self.tel_last_seq = int(msg.get("seq", self.tel_last_seq))
+            self.tel_last_timestamp_s = float(msg.get("timestamp_s", 0.0))
+            self.tel_last_rx_monotonic_s = float(rx_monotonic_s)
+
+    def record_tel_drop(self, reason: str) -> None:
+        attr = _TEL_DROP_REASON_ATTRS.get(reason)
+        if attr is None:
+            raise ValueError(f"unsupported TEL drop reason: {reason}")
+        with self.lock:
+            self.tel_rx_bad += 1
+            setattr(self, attr, getattr(self, attr) + 1)
+
     def record_vis_rx_total(self) -> None:
         with self.lock:
             self.vis_rx_total += 1
 
     def record_vis_ok(self, msg: dict[str, Any], rx_monotonic_s: float) -> None:
         with self.lock:
-            self.latest_vis = msg
+            self.latest_vis = dict(msg)
             self.vis_seq = int(msg.get("seq", self.vis_seq))
             self.vis_rx_ok += 1
             self.vis_last_seq = int(msg.get("seq", self.vis_last_seq))
@@ -170,11 +256,57 @@ class SharedState:
                 "last_cmd_bytes": self.last_cmd_bytes,
             }
 
+    def get_latest_tel(self) -> dict[str, Any] | None:
+        with self.lock:
+            if self.latest_tel is None:
+                return None
+            return dict(self.latest_tel)
+
+    def get_latest_tel_with_meta(self) -> tuple[dict[str, Any] | None, float | None]:
+        with self.lock:
+            if self.latest_tel is None:
+                return None, None
+            return dict(self.latest_tel), self.tel_last_rx_monotonic_s
+
+    def get_tel_age_s(self, now_monotonic_s: float | None = None) -> float | None:
+        with self.lock:
+            last_rx = self.tel_last_rx_monotonic_s
+        if last_rx is None:
+            return None
+        now_s = now_monotonic_s if now_monotonic_s is not None else time.monotonic()
+        return max(0.0, float(now_s) - last_rx)
+
+    def get_tel_stats(self) -> dict[str, Any]:
+        with self.lock:
+            last_rx = self.tel_last_rx_monotonic_s
+            tel_age_s = None
+            if last_rx is not None:
+                tel_age_s = max(0.0, time.monotonic() - last_rx)
+            return {
+                "tel_rx_total": self.tel_rx_total,
+                "tel_rx_ok": self.tel_rx_ok,
+                "tel_rx_bad": self.tel_rx_bad,
+                "tel_drop_reason_oversize": self.tel_drop_reason_oversize,
+                "tel_drop_reason_json": self.tel_drop_reason_json,
+                "tel_drop_reason_schema": self.tel_drop_reason_schema,
+                "tel_drop_reason_range": self.tel_drop_reason_range,
+                "tel_last_seq": self.tel_last_seq,
+                "tel_last_timestamp_s": self.tel_last_timestamp_s,
+                "tel_last_rx_monotonic_s": self.tel_last_rx_monotonic_s,
+                "tel_age_s": tel_age_s,
+            }
+
     def get_latest_vis(self) -> dict[str, Any] | None:
         with self.lock:
             if self.latest_vis is None:
                 return None
             return dict(self.latest_vis)
+
+    def get_latest_vis_with_meta(self) -> tuple[dict[str, Any] | None, float | None]:
+        with self.lock:
+            if self.latest_vis is None:
+                return None, None
+            return dict(self.latest_vis), self.vis_last_rx_monotonic_s
 
     def get_vis_age_s(self, now_monotonic_s: float | None = None) -> float | None:
         with self.lock:
@@ -229,21 +361,70 @@ class SharedState:
                 "vis_last_timestamp_s": self.vis_last_timestamp_s,
             }
 
+    def get_link_status(
+        self,
+        vis_fresh_s: float,
+        cmd_timeout_s: float,
+        cmd_hz: float,
+        tel_hz: float,
+        now_monotonic_s: float | None = None,
+    ) -> dict[str, Any]:
+        now_s = float(now_monotonic_s) if now_monotonic_s is not None else time.monotonic()
+        with self.lock:
+            vis_age_s = None
+            if self.vis_last_rx_monotonic_s is not None:
+                vis_age_s = max(0.0, now_s - self.vis_last_rx_monotonic_s)
+
+            tel_age_s = None
+            if self.tel_last_rx_monotonic_s is not None:
+                tel_age_s = max(0.0, now_s - self.tel_last_rx_monotonic_s)
+
+            return {
+                "fc_connected": self.fc_connected,
+                "fc_last_connect_attempt_s": self.fc_last_connect_attempt_s,
+                "cmd_tx_total": self.cmd_tx_total,
+                "cmd_tx_ok": self.cmd_tx_ok,
+                "cmd_tx_fail": self.cmd_tx_fail,
+                "cmd_last_sent_monotonic_s": self.cmd_last_sent_monotonic_s,
+                "cmd_hz_est": self.cmd_hz_est,
+                "tracking_blocked_reason": self.tracking_blocked_reason,
+                "vis_age_s": vis_age_s,
+                "vis_rx_ok": self.vis_rx_ok,
+                "vis_rx_bad": self.vis_rx_bad,
+                "vis_drop_reason_oversize": self.vis_drop_reason_oversize,
+                "vis_drop_reason_json": self.vis_drop_reason_json,
+                "vis_drop_reason_schema": self.vis_drop_reason_schema,
+                "vis_drop_reason_range": self.vis_drop_reason_range,
+                "vis_drop_reason_semantics": self.vis_drop_reason_semantics,
+                "tel_age_s": tel_age_s,
+                "tel_rx_ok": self.tel_rx_ok,
+                "tel_rx_bad": self.tel_rx_bad,
+                "vis_fresh_s": float(vis_fresh_s),
+                "cmd_timeout_s": float(cmd_timeout_s),
+                "cmd_hz": float(cmd_hz),
+                "tel_hz": float(tel_hz),
+            }
+
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
-            now_s = time.monotonic()
-            last_rx = self.vis_last_rx_monotonic_s
-            vis_age_s = None
-            vis_connected = False
-            if last_rx is not None:
-                vis_age_s = max(0.0, now_s - last_rx)
-                vis_connected = vis_age_s <= 1.0
             return {
                 "tel": self.latest_tel,
                 "vis": self.latest_vis,
                 "intent": self.latest_intent,
                 "tel_seq": self.tel_seq,
                 "vis_seq": self.vis_seq,
+                "tel_stats": {
+                    "tel_rx_total": self.tel_rx_total,
+                    "tel_rx_ok": self.tel_rx_ok,
+                    "tel_rx_bad": self.tel_rx_bad,
+                    "tel_drop_reason_oversize": self.tel_drop_reason_oversize,
+                    "tel_drop_reason_json": self.tel_drop_reason_json,
+                    "tel_drop_reason_schema": self.tel_drop_reason_schema,
+                    "tel_drop_reason_range": self.tel_drop_reason_range,
+                    "tel_last_seq": self.tel_last_seq,
+                    "tel_last_timestamp_s": self.tel_last_timestamp_s,
+                    "tel_last_rx_monotonic_s": self.tel_last_rx_monotonic_s,
+                },
                 "vis_stats": {
                     "vis_rx_total": self.vis_rx_total,
                     "vis_rx_ok": self.vis_rx_ok,
@@ -256,14 +437,6 @@ class SharedState:
                     "vis_last_seq": self.vis_last_seq,
                     "vis_last_timestamp_s": self.vis_last_timestamp_s,
                     "vis_last_rx_monotonic_s": self.vis_last_rx_monotonic_s,
-                },
-                "vis_status": {
-                    "vis_connected": vis_connected,
-                    "vis_age_s": vis_age_s,
-                    "vis_rx_ok": self.vis_rx_ok,
-                    "vis_rx_bad": self.vis_rx_bad,
-                    "vis_last_seq": self.vis_last_seq,
-                    "vis_last_timestamp_s": self.vis_last_timestamp_s,
                 },
                 "cmd_status": {
                     "fc_connected": self.fc_connected,
