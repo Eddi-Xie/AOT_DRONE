@@ -1,3 +1,4 @@
+import { memo } from "react";
 import { ControlMode, toControlModeName } from "../types";
 
 interface ControlPanelProps {
@@ -19,7 +20,7 @@ const MODE_OPTIONS: Array<{ mode: ControlMode; label: string }> = [
   { mode: ControlMode.LandSafely, label: "LandSafely" },
 ];
 
-export default function ControlPanel({
+function ControlPanel({
   selectedMode,
   actualMode,
   armed,
@@ -75,3 +76,5 @@ export default function ControlPanel({
     </section>
   );
 }
+
+export default memo(ControlPanel);

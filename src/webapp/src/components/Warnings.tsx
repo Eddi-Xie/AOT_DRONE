@@ -1,11 +1,22 @@
-import { StatusAlert, WarningEntry } from "../types";
+import { memo, useMemo } from "react";
+import { StatusAlert, WarningEntry, WarningSeverity } from "../types";
+import StatusBadge from "./StatusBadge";
 
 interface WarningsProps {
-  statusAlerts: StatusAlert[];
+  derivedAlerts: StatusAlert[];
   warnings: WarningEntry[];
+  onClear: () => void;
 }
 
-function severityLabel(severity: "info" | "warn" | "error"): string {
+interface GroupedWarning {
+  kind: string;
+  detail: string;
+  severity: WarningSeverity;
+  count: number;
+  lastReceivedAtMs: number;
+}
+
+function severityLabel(severity: WarningSeverity): string {
   if (severity === "error") {
     return "Error";
   }
@@ -15,18 +26,63 @@ function severityLabel(severity: "info" | "warn" | "error"): string {
   return "Info";
 }
 
-export default function Warnings({ statusAlerts, warnings }: WarningsProps): JSX.Element {
-  const recentWarnings = warnings.slice(0, 3);
+function severityToBadge(severity: WarningSeverity): "info" | "warn" | "bad" {
+  if (severity === "error") {
+    return "bad";
+  }
+  if (severity === "warn") {
+    return "warn";
+  }
+  return "info";
+}
+
+function Warnings({ derivedAlerts, warnings, onClear }: WarningsProps): JSX.Element {
+  const groupedWarnings = useMemo(() => {
+    const byKind = new Map<string, GroupedWarning>();
+
+    for (const warning of warnings) {
+      const existing = byKind.get(warning.kind);
+
+      if (existing) {
+        existing.count += 1;
+        if (warning.receivedAtMs > existing.lastReceivedAtMs) {
+          existing.detail = warning.detail;
+          existing.severity = warning.severity;
+          existing.lastReceivedAtMs = warning.receivedAtMs;
+        }
+      } else {
+        byKind.set(warning.kind, {
+          kind: warning.kind,
+          detail: warning.detail,
+          severity: warning.severity,
+          count: 1,
+          lastReceivedAtMs: warning.receivedAtMs,
+        });
+      }
+    }
+
+    return Array.from(byKind.values())
+      .sort((a, b) => b.lastReceivedAtMs - a.lastReceivedAtMs)
+      .slice(0, 5);
+  }, [warnings]);
 
   return (
     <section className="panel warnings-panel">
-      <h2>Warnings</h2>
+      <div className="warnings-panel__header">
+        <h2>Warnings</h2>
+        <button className="warnings-panel__clear" onClick={onClear} type="button">
+          Clear
+        </button>
+      </div>
 
-      {statusAlerts.length > 0 ? (
+      {derivedAlerts.length > 0 ? (
         <div className="warnings-panel__status-list">
-          {statusAlerts.map((alert) => (
+          {derivedAlerts.map((alert) => (
             <div className={`warning-item warning-item--${alert.severity}`} key={alert.id}>
-              <span className="warning-item__badge">{severityLabel(alert.severity)}</span>
+              <StatusBadge
+                label={severityLabel(alert.severity)}
+                severity={severityToBadge(alert.severity)}
+              />
               <p>{alert.detail}</p>
             </div>
           ))}
@@ -34,20 +90,22 @@ export default function Warnings({ statusAlerts, warnings }: WarningsProps): JSX
       ) : null}
 
       <div className="warnings-panel__event-list">
-        {recentWarnings.length === 0 ? (
+        {groupedWarnings.length === 0 ? (
           <p className="warnings-panel__empty">No warning events received.</p>
         ) : (
-          recentWarnings.map((warning) => (
-            <div
-              className={`warning-item warning-item--${warning.severity}`}
-              key={`${warning.envelopeSeq}-${warning.kind}`}
-            >
-              <span className="warning-item__badge">{severityLabel(warning.severity)}</span>
+          groupedWarnings.map((warning) => (
+            <div className={`warning-item warning-item--${warning.severity}`} key={warning.kind}>
+              <StatusBadge
+                label={severityLabel(warning.severity)}
+                severity={severityToBadge(warning.severity)}
+              />
               <div>
-                <p className="warning-item__kind">{warning.kind}</p>
+                <p className="warning-item__kind">
+                  {warning.kind} x{warning.count}
+                </p>
                 <p>{warning.detail}</p>
                 <p className="warning-item__time">
-                  {new Date(warning.receivedAtMs).toLocaleTimeString()}
+                  Last seen {new Date(warning.lastReceivedAtMs).toLocaleTimeString()}
                 </p>
               </div>
             </div>
@@ -57,3 +115,5 @@ export default function Warnings({ statusAlerts, warnings }: WarningsProps): JSX
     </section>
   );
 }
+
+export default memo(Warnings);
