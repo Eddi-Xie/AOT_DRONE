@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { getBackendConfig, postIntent } from "./api";
 import ControlPanel from "./components/ControlPanel";
+import StatusBadge, { BadgeSeverity } from "./components/StatusBadge";
 import TelemetryPanel from "./components/TelemetryPanel";
+import TrackingSummary from "./components/TrackingSummary";
 import VideoPanel from "./components/VideoPanel";
 import Warnings from "./components/Warnings";
 import {
@@ -10,6 +12,7 @@ import {
   LinkStatus,
   StatusAlert,
   TelUpdate,
+  TrackingState,
   VisUpdate,
   WarningEntry,
   WsEnvelope,
@@ -18,12 +21,21 @@ import {
   asVisUpdate,
   asWarningPayload,
   formatNumber,
+  readNumber,
   toControlModeName,
+  toTrackingStateName,
 } from "./types";
+import { formatSeconds, projectAge } from "./utils/format";
+import { DEFAULT_HISTORY_LIMIT, pushHistorySample } from "./utils/historyBuffer";
 import { runOverlayMathDevAssertions } from "./utils/overlayMathAssertions";
 import { ReconnectingWsClient } from "./ws";
 
 type IntentFeedbackKind = "idle" | "sending" | "success" | "error";
+
+const MAX_WARNING_EVENTS = 120;
+const DERIVED_WARNING_HOLD_MS = 1500;
+const DEFAULT_VIS_FRESH_S = 0.25;
+const DEFAULT_TEL_FRESH_S = 0.5;
 
 interface AppState {
   wsConnected: boolean;
@@ -34,6 +46,8 @@ interface AppState {
   latestTel: TelUpdate | null;
   latestVis: VisUpdate | null;
   warnings: WarningEntry[];
+  confidenceHistory: number[];
+  ageHistory: number[];
   selectedMode: ControlMode;
   armed: boolean;
   intentPending: boolean;
@@ -47,7 +61,36 @@ interface PendingStreamBatch {
   linkEnvelopeTimestampS?: number;
   latestTel?: TelUpdate;
   latestVis?: VisUpdate;
+  overlayConfidenceSample?: number;
+  overlayAgeSample?: number;
   lastMessageAtMs: number | null;
+}
+
+interface SelectedTrackingData {
+  trackingState: number | null;
+  confidence: number | null;
+  boundW: number | null;
+  boundH: number | null;
+  targetX: number | null;
+  targetY: number | null;
+  ageSFromMessage: number | null;
+}
+
+function areStatusAlertsEqual(a: readonly StatusAlert[], b: readonly StatusAlert[]): boolean {
+  if (a === b) {
+    return true;
+  }
+  if (a.length !== b.length) {
+    return false;
+  }
+  for (let index = 0; index < a.length; index += 1) {
+    const left = a[index];
+    const right = b[index];
+    if (left.id !== right.id || left.detail !== right.detail || left.severity !== right.severity) {
+      return false;
+    }
+  }
+  return true;
 }
 
 type AppAction =
@@ -61,6 +104,7 @@ type AppAction =
       warning: WarningEntry;
       receivedAtMs: number;
     }
+  | { type: "CLEAR_WARNINGS" }
   | { type: "SET_SELECTED_MODE"; mode: ControlMode }
   | { type: "SET_ARMED"; armed: boolean }
   | { type: "INTENT_PENDING"; message: string }
@@ -79,12 +123,102 @@ const INITIAL_STATE: AppState = {
   latestTel: null,
   latestVis: null,
   warnings: [],
+  confidenceHistory: [],
+  ageHistory: [],
   selectedMode: ControlMode.Manual,
   armed: false,
   intentPending: false,
   intentFeedbackKind: "idle",
   intentFeedbackMessage: "Ready.",
 };
+
+function normalizeConfidenceSample(value: number | null): number {
+  if (value === null) {
+    return 0;
+  }
+  if (value < 0) {
+    return 0;
+  }
+  if (value > 1) {
+    return 1;
+  }
+  return value;
+}
+
+function normalizeAgeSample(value: number | null): number {
+  if (value === null || value < 0) {
+    return 0;
+  }
+  return value;
+}
+
+function toTrackingBadgeSeverity(trackingState: number | null): BadgeSeverity {
+  switch (trackingState) {
+    case TrackingState.TargetDetected:
+      return "info";
+    case TrackingState.Tracking:
+      return "good";
+    case TrackingState.Searching:
+      return "warn";
+    case TrackingState.NoTarget:
+      return "neutral";
+    default:
+      return "neutral";
+  }
+}
+
+function mapBlockedReason(reason: string | null): { label: string; severity: BadgeSeverity } | null {
+  if (!reason) {
+    return null;
+  }
+
+  if (reason === "stale_vis") {
+    return {
+      label: "Vision stale",
+      severity: "warn",
+    };
+  }
+
+  if (reason === "no_vis") {
+    return {
+      label: "No vision",
+      severity: "bad",
+    };
+  }
+
+  return {
+    label: `Blocked: ${reason}`,
+    severity: "warn",
+  };
+}
+
+function selectTrackingData(
+  overlaySource: "VIS" | "TEL",
+  latestVis: VisUpdate | null,
+  latestTel: TelUpdate | null,
+): SelectedTrackingData {
+  if (overlaySource === "TEL") {
+    return {
+      trackingState: readNumber(latestTel?.tracking_state),
+      confidence: readNumber(latestTel?.confidence),
+      boundW: readNumber(latestTel?.bound_w),
+      boundH: readNumber(latestTel?.bound_h),
+      targetX: readNumber(latestTel?.target_x),
+      targetY: readNumber(latestTel?.target_y),
+      ageSFromMessage: readNumber(latestTel?.tel_age_s),
+    };
+  }
+
+  return {
+    trackingState: readNumber(latestVis?.tracking_state),
+    confidence: readNumber(latestVis?.confidence),
+    boundW: readNumber(latestVis?.bound_w),
+    boundH: readNumber(latestVis?.bound_h),
+    targetX: readNumber(latestVis?.loc_x),
+    targetY: readNumber(latestVis?.loc_y),
+    ageSFromMessage: readNumber(latestVis?.vis_age_s),
+  };
+}
 
 function reducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
@@ -114,13 +248,34 @@ function reducer(state: AppState, action: AppAction): AppState {
         nextState.latestVis = action.batch.latestVis;
       }
 
+      if (action.batch.overlayConfidenceSample !== undefined) {
+        nextState.confidenceHistory = pushHistorySample(
+          state.confidenceHistory,
+          action.batch.overlayConfidenceSample,
+          DEFAULT_HISTORY_LIMIT,
+        );
+      }
+
+      if (action.batch.overlayAgeSample !== undefined) {
+        nextState.ageHistory = pushHistorySample(
+          state.ageHistory,
+          action.batch.overlayAgeSample,
+          DEFAULT_HISTORY_LIMIT,
+        );
+      }
+
       return nextState;
     }
     case "WARNING_RECEIVED":
       return {
         ...state,
         lastWsMessageAtMs: action.receivedAtMs,
-        warnings: [action.warning, ...state.warnings].slice(0, 3),
+        warnings: [action.warning, ...state.warnings].slice(0, MAX_WARNING_EVENTS),
+      };
+    case "CLEAR_WARNINGS":
+      return {
+        ...state,
+        warnings: [],
       };
     case "SET_SELECTED_MODE":
       return {
@@ -160,6 +315,7 @@ function formatError(error: unknown): string {
 
 export default function App(): JSX.Element {
   const backendConfig = useMemo(() => getBackendConfig(), []);
+  const overlaySource = backendConfig.overlaySource;
   const [state, dispatch] = useReducer(reducer, INITIAL_STATE);
   const [nowMs, setNowMs] = useState(() => Date.now());
 
@@ -169,6 +325,8 @@ export default function App(): JSX.Element {
   const frameIdRef = useRef<number | null>(null);
   const intentInFlightRef = useRef(false);
   const lastDesiredModeRef = useRef<ControlMode>(ControlMode.Manual);
+  const derivedWarningHoldRef = useRef<Record<string, number>>({});
+  const derivedAlertsStableRef = useRef<StatusAlert[]>([]);
 
   useEffect(() => {
     if (import.meta.env.DEV && import.meta.env.VITE_DEBUG_OVERLAY === "1") {
@@ -240,17 +398,25 @@ export default function App(): JSX.Element {
         const latestTel = asTelUpdate(envelope.data);
         if (latestTel) {
           pending.latestTel = latestTel;
+          if (overlaySource === "TEL") {
+            pending.overlayConfidenceSample = normalizeConfidenceSample(readNumber(latestTel.confidence));
+            pending.overlayAgeSample = normalizeAgeSample(readNumber(latestTel.tel_age_s));
+          }
         }
       } else if (envelope.event === "VIS_UPDATE") {
         const latestVis = asVisUpdate(envelope.data);
         if (latestVis) {
           pending.latestVis = latestVis;
+          if (overlaySource === "VIS") {
+            pending.overlayConfidenceSample = normalizeConfidenceSample(readNumber(latestVis.confidence));
+            pending.overlayAgeSample = normalizeAgeSample(readNumber(latestVis.vis_age_s));
+          }
         }
       }
 
       scheduleFlush();
     },
-    [scheduleFlush],
+    [overlaySource, scheduleFlush],
   );
 
   useEffect(() => {
@@ -357,15 +523,58 @@ export default function App(): JSX.Element {
     );
   }, [sendIntent, state.armed]);
 
-  const statusAlerts = useMemo<StatusAlert[]>(() => {
-    const alerts: StatusAlert[] = [];
-    const linkStatus = state.linkStatus;
+  const onClearWarnings = useCallback(() => {
+    dispatch({ type: "CLEAR_WARNINGS" });
+  }, []);
 
-    if (linkStatus === null) {
-      return alerts;
+  const selectedTrackingPayload = overlaySource === "VIS" ? state.latestVis : state.latestTel;
+  const selectedTracking = useMemo(() => {
+    if (overlaySource === "VIS") {
+      return selectTrackingData("VIS", state.latestVis, null);
+    }
+    return selectTrackingData("TEL", null, state.latestTel);
+  }, [overlaySource, selectedTrackingPayload]);
+
+  const wsAgeS =
+    state.lastWsMessageAtMs === null ? null : Math.max(0, (nowMs - state.lastWsMessageAtMs) / 1000);
+
+  const projectedVisAgeS = projectAge(readNumber(state.linkStatus?.vis_age_s), state.linkUpdatedAtMs, nowMs);
+  const projectedTelAgeS = projectAge(readNumber(state.linkStatus?.tel_age_s), state.linkUpdatedAtMs, nowMs);
+
+  const visFreshThresholdRaw = readNumber(state.linkStatus?.vis_fresh_s);
+  const visFreshThresholdS =
+    visFreshThresholdRaw !== null && visFreshThresholdRaw > 0 ? visFreshThresholdRaw : DEFAULT_VIS_FRESH_S;
+  const telFreshThresholdRaw = readNumber(state.linkStatus?.tel_fresh_s);
+  const telFreshThresholdS =
+    telFreshThresholdRaw !== null && telFreshThresholdRaw > 0 ? telFreshThresholdRaw : DEFAULT_TEL_FRESH_S;
+
+  const trackingAgeS =
+    selectedTracking.ageSFromMessage ?? (overlaySource === "VIS" ? projectedVisAgeS : projectedTelAgeS);
+  const trackingFreshThresholdS = overlaySource === "VIS" ? visFreshThresholdS : telFreshThresholdS;
+
+  const blockedBadge = mapBlockedReason(trackingBlockedReason);
+
+  const derivedAlerts = useMemo<StatusAlert[]>(() => {
+    const alerts: StatusAlert[] = [];
+    const holdUntil = derivedWarningHoldRef.current;
+
+    const held = (id: string, condition: boolean): boolean => {
+      if (condition) {
+        holdUntil[id] = nowMs + DERIVED_WARNING_HOLD_MS;
+        return true;
+      }
+      return (holdUntil[id] ?? 0) > nowMs;
+    };
+
+    if (held("ws-disconnected", !state.wsConnected)) {
+      alerts.push({
+        id: "ws-disconnected",
+        detail: "WebSocket disconnected.",
+        severity: "error",
+      });
     }
 
-    if (!linkStatus.fc_connected) {
+    if (held("fc-disconnected", state.linkStatus?.fc_connected === false)) {
       alerts.push({
         id: "fc-disconnected",
         detail: "FC command link is disconnected.",
@@ -373,47 +582,59 @@ export default function App(): JSX.Element {
       });
     }
 
-    if (linkStatus.tracking_blocked_reason) {
-      alerts.push({
-        id: `tracking-blocked-${linkStatus.tracking_blocked_reason}`,
-        detail: `Tracking blocked: ${linkStatus.tracking_blocked_reason}`,
-        severity: "warn",
-      });
-    }
-
-    if (
-      linkStatus.vis_age_s !== null &&
-      linkStatus.vis_fresh_s > 0 &&
-      linkStatus.vis_age_s > linkStatus.vis_fresh_s
-    ) {
+    if (held("vis-stale", projectedVisAgeS !== null && projectedVisAgeS >= visFreshThresholdS)) {
       alerts.push({
         id: "vis-stale",
-        detail: `Vision link stale (${formatNumber(linkStatus.vis_age_s, 2, " s")}).`,
+        detail: `Vision stale (>= ${formatSeconds(visFreshThresholdS, 2)}).`,
         severity: "warn",
       });
     }
 
-    const telStaleThresholdS = linkStatus.tel_hz > 0 ? Math.max(1.0, 3 / linkStatus.tel_hz) : 1.0;
-    if (linkStatus.tel_age_s !== null && linkStatus.tel_age_s > telStaleThresholdS) {
+    if (held("tel-stale", projectedTelAgeS !== null && projectedTelAgeS >= DEFAULT_TEL_FRESH_S)) {
       alerts.push({
         id: "tel-stale",
-        detail: `Telemetry link stale (${formatNumber(linkStatus.tel_age_s, 2, " s")}).`,
+        detail: `Telemetry stale (>= ${formatSeconds(DEFAULT_TEL_FRESH_S, 2)}).`,
         severity: "warn",
       });
     }
 
-    return alerts;
-  }, [state.linkStatus]);
+    if (trackingBlockedReason) {
+      alerts.push({
+        id: `tracking-blocked-${trackingBlockedReason}`,
+        detail:
+          trackingBlockedReason === "stale_vis"
+            ? "Tracking blocked: Vision stale."
+            : trackingBlockedReason === "no_vis"
+              ? "Tracking blocked: No vision."
+              : `Tracking blocked: ${trackingBlockedReason}`,
+        severity: trackingBlockedReason === "no_vis" ? "error" : "warn",
+      });
+    }
 
-  const wsAgeS =
-    state.lastWsMessageAtMs === null ? null : Math.max(0, (nowMs - state.lastWsMessageAtMs) / 1000);
+    return alerts.slice(0, 5);
+  }, [
+    nowMs,
+    projectedTelAgeS,
+    projectedVisAgeS,
+    state.linkStatus?.fc_connected,
+    state.wsConnected,
+    trackingBlockedReason,
+    visFreshThresholdS,
+  ]);
+  const stableDerivedAlerts = useMemo(() => {
+    const previous = derivedAlertsStableRef.current;
+    if (areStatusAlertsEqual(previous, derivedAlerts)) {
+      return previous;
+    }
+    derivedAlertsStableRef.current = derivedAlerts;
+    return derivedAlerts;
+  }, [derivedAlerts]);
 
   const fcConnected = state.linkStatus?.fc_connected ?? false;
   const actualMode =
     state.latestTel?.control_mode !== undefined && state.latestTel?.control_mode !== null
       ? state.latestTel.control_mode
       : null;
-  const overlaySource = backendConfig.overlaySource;
 
   return (
     <div className="app-shell">
@@ -425,19 +646,32 @@ export default function App(): JSX.Element {
         </div>
 
         <div className="top-bar__badges">
-          <div className={`status-pill ${state.wsConnected ? "status-pill--ok" : "status-pill--warn"}`}>
-            WS {state.wsConnected ? "Connected" : "Disconnected"}
-          </div>
-          <div className={`status-pill ${fcConnected ? "status-pill--ok" : "status-pill--warn"}`}>
-            FC {fcConnected ? "Connected" : "Disconnected"}
-          </div>
-          <div className="top-bar__age">
-            Last WS msg: {wsAgeS === null ? "n/a" : `${formatNumber(wsAgeS, 1, " s")} ago`}
-          </div>
+          <StatusBadge
+            label={`WS ${state.wsConnected ? "Connected" : "Disconnected"}`}
+            severity={state.wsConnected ? "good" : "bad"}
+            subtext={wsAgeS === null ? "No messages yet" : `last ${formatNumber(wsAgeS, 1)}s ago`}
+          />
+          <StatusBadge
+            label={`FC ${fcConnected ? "Connected" : "Disconnected"}`}
+            severity={fcConnected ? "good" : "warn"}
+          />
+          <StatusBadge
+            label={`State ${toTrackingStateName(selectedTracking.trackingState)}`}
+            severity={toTrackingBadgeSeverity(selectedTracking.trackingState)}
+            subtext={selectedTracking.trackingState === null ? "No source data" : undefined}
+            title="Tracking state from selected overlay source"
+          />
+          {blockedBadge ? (
+            <StatusBadge label={blockedBadge.label} severity={blockedBadge.severity} />
+          ) : null}
         </div>
       </header>
 
-      <Warnings statusAlerts={statusAlerts} warnings={state.warnings} />
+      <Warnings
+        derivedAlerts={stableDerivedAlerts}
+        warnings={state.warnings}
+        onClear={onClearWarnings}
+      />
 
       <main className="main-grid">
         <ControlPanel
@@ -458,6 +692,21 @@ export default function App(): JSX.Element {
             latestVis={state.latestVis}
             overlaySource={overlaySource}
             videoUrl={backendConfig.videoUrl}
+          />
+
+          <TrackingSummary
+            overlaySource={overlaySource}
+            trackingState={selectedTracking.trackingState}
+            trackingBlockedReason={trackingBlockedReason}
+            confidence={selectedTracking.confidence}
+            boundW={selectedTracking.boundW}
+            boundH={selectedTracking.boundH}
+            targetX={selectedTracking.targetX}
+            targetY={selectedTracking.targetY}
+            ageS={trackingAgeS}
+            freshThresholdS={trackingFreshThresholdS}
+            confidenceHistory={state.confidenceHistory}
+            ageHistory={state.ageHistory}
           />
 
           <TelemetryPanel
