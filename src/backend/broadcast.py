@@ -27,6 +27,7 @@ class BackendBroadcaster:
         cmd_hz_nominal: float = 50.0,
         tel_hz_nominal: float = 50.0,
         warning_min_interval_s: float = 2.0,
+        link_status_extra_provider: Callable[[float], dict[str, Any]] | None = None,
         clock: Callable[[], float] | None = None,
         wait_fn: Callable[[threading.Event, float], None] | None = None,
     ) -> None:
@@ -53,6 +54,7 @@ class BackendBroadcaster:
         self.cmd_hz_nominal = cmd_hz_nominal
         self.tel_hz_nominal = tel_hz_nominal
         self.warning_min_interval_s = warning_min_interval_s
+        self._link_status_extra_provider = link_status_extra_provider
 
         self._clock = clock or time.monotonic
         self._wait_fn = wait_fn or self._default_wait
@@ -83,13 +85,17 @@ class BackendBroadcaster:
             self._thread.join(timeout=join_timeout_s)
 
     def build_link_status(self, now_monotonic_s: float | None = None) -> dict[str, Any]:
-        return self._state.get_link_status(
+        now_s = float(now_monotonic_s) if now_monotonic_s is not None else self._clock()
+        payload = self._state.get_link_status(
             vis_fresh_s=self.vis_fresh_s,
             cmd_timeout_s=self.cmd_timeout_s,
             cmd_hz=self.cmd_hz_nominal,
             tel_hz=self.tel_hz_nominal,
-            now_monotonic_s=now_monotonic_s,
+            now_monotonic_s=now_s,
         )
+        if self._link_status_extra_provider is not None:
+            payload.update(dict(self._link_status_extra_provider(now_s)))
+        return payload
 
     def build_tel_update_data(self, now_monotonic_s: float | None = None) -> dict[str, Any] | None:
         tel_snapshot, tel_rx_s = self._state.get_latest_tel_with_meta()

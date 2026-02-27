@@ -4,10 +4,11 @@ import asyncio
 import os
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .broadcast import BackendBroadcaster
@@ -24,6 +25,13 @@ from .protocol_constants import (
 )
 from .state import SharedState
 from .tel_ingest import TelUdpIngestor
+from .video_hub import (
+    SyntheticJpegGenerator,
+    VideoConfig,
+    VideoFrameHub,
+    can_decode_jpeg,
+    make_mjpeg_part,
+)
 from .vis_ingest import VisUdpIngestor
 from .ws_manager import WsManager
 
@@ -40,10 +48,17 @@ _vis_thread: threading.Thread | None = None
 _cmd_bridge: CmdBridge | None = None
 _ws_manager: WsManager | None = None
 _broadcaster: BackendBroadcaster | None = None
+_video_hub: VideoFrameHub | None = None
+_synthetic_jpeg_generator: SyntheticJpegGenerator | None = None
 
 _runtime_vis_fresh_s = 0.25
 _runtime_cmd_hz = 50.0
 _runtime_tel_hz = 50.0
+_runtime_video_enabled = True
+_runtime_video_fps = 10.0
+_runtime_video_max_jpeg_bytes = 200_000
+_runtime_video_frame_fresh_s = 1.0
+_runtime_video_validate_decode = False
 
 
 class IntentRequest(BaseModel):
@@ -56,11 +71,23 @@ class IntentRequest(BaseModel):
 def startup() -> None:
     global _broadcaster, _cmd_bridge, _tel_ingestor, _tel_thread, _vis_ingestor, _vis_thread
     global _ws_manager, _runtime_cmd_hz, _runtime_tel_hz, _runtime_vis_fresh_s
+    global _runtime_video_enabled, _runtime_video_fps, _runtime_video_max_jpeg_bytes
+    global _runtime_video_frame_fresh_s, _runtime_video_validate_decode
+    global _video_hub, _synthetic_jpeg_generator
 
     state.reset()
     _runtime_cmd_hz = _read_env_float("BACKEND_CMD_HZ", 50.0)
     _runtime_tel_hz = _read_env_float("BACKEND_TEL_HZ_NOMINAL", 50.0)
     _runtime_vis_fresh_s = _read_env_float("BACKEND_VIS_FRESH_S", 0.25)
+    _runtime_video_enabled = _read_env_bool("BACKEND_VIDEO_ENABLED", True)
+    _runtime_video_fps = max(0.5, _read_env_float("BACKEND_VIDEO_FPS", 10.0))
+    _runtime_video_max_jpeg_bytes = max(
+        1024, _read_env_int("BACKEND_VIDEO_MAX_JPEG_BYTES", 200_000)
+    )
+    _runtime_video_frame_fresh_s = max(0.0, _read_env_float("BACKEND_VIDEO_FRAME_FRESH_S", 1.0))
+    _runtime_video_validate_decode = _read_env_bool("BACKEND_VIDEO_VALIDATE_DECODE", False)
+    _video_hub = VideoFrameHub()
+    _synthetic_jpeg_generator = SyntheticJpegGenerator(width=640, height=360)
 
     _ws_manager = WsManager(queue_max=_read_env_int("BACKEND_WS_CLIENT_QUEUE_MAX", 10))
     _broadcaster = BackendBroadcaster(
@@ -74,6 +101,7 @@ def startup() -> None:
         cmd_hz_nominal=_runtime_cmd_hz,
         tel_hz_nominal=_runtime_tel_hz,
         warning_min_interval_s=_read_env_float("BACKEND_WS_WARNING_INTERVAL_S", 2.0),
+        link_status_extra_provider=_build_video_status,
     )
     _broadcaster.start()
 
@@ -123,12 +151,19 @@ def startup() -> None:
     app.state.tel_ingestor = _tel_ingestor
     app.state.vis_ingestor = _vis_ingestor
     app.state.cmd_bridge = _cmd_bridge
+    app.state.video_hub = _video_hub
+    app.state.video_config = VideoConfig(
+        enabled=_runtime_video_enabled,
+        fps=_runtime_video_fps,
+        max_jpeg_bytes=_runtime_video_max_jpeg_bytes,
+        frame_fresh_s=_runtime_video_frame_fresh_s,
+    )
 
 
 @app.on_event("shutdown")
 def shutdown() -> None:
     global _broadcaster, _cmd_bridge, _tel_ingestor, _tel_thread, _vis_ingestor, _vis_thread
-    global _ws_manager
+    global _ws_manager, _video_hub, _synthetic_jpeg_generator
 
     if _cmd_bridge is not None:
         _cmd_bridge.stop()
@@ -154,12 +189,16 @@ def shutdown() -> None:
         _broadcaster.stop(join_timeout_s=1.0)
         _broadcaster = None
     _ws_manager = None
+    _video_hub = None
+    _synthetic_jpeg_generator = None
 
     app.state.ws_manager = None
     app.state.broadcaster = None
     app.state.tel_ingestor = None
     app.state.vis_ingestor = None
     app.state.cmd_bridge = None
+    app.state.video_hub = None
+    app.state.video_config = None
 
 
 @app.get("/health")
@@ -189,12 +228,15 @@ def post_intent(intent_req: IntentRequest) -> dict[str, Any]:
 
 @app.get("/api/status")
 def api_status() -> dict[str, Any]:
+    now_s = time.monotonic()
     status = state.get_link_status(
         vis_fresh_s=_runtime_vis_fresh_s,
         cmd_timeout_s=CMD_TIMEOUT_S,
         cmd_hz=_runtime_cmd_hz,
         tel_hz=_runtime_tel_hz,
+        now_monotonic_s=now_s,
     )
+    status.update(_build_video_status(now_monotonic_s=now_s))
     cmd_status = state.get_cmd_bridge_status()
     status["last_cmd_payload"] = {
         "last_cmd_seq": cmd_status["last_cmd_seq"],
@@ -203,6 +245,85 @@ def api_status() -> dict[str, Any]:
         "last_cmd_bytes": cmd_status["last_cmd_bytes"],
     }
     return status
+
+
+@app.post("/api/frame")
+async def post_frame(request: Request) -> dict[str, Any]:
+    if not _runtime_video_enabled:
+        raise HTTPException(status_code=503, detail="video streaming is disabled")
+
+    video_hub = _video_hub
+    if video_hub is None:
+        raise HTTPException(status_code=503, detail="video subsystem not ready")
+
+    content_type = request.headers.get("content-type", "").lower()
+    if "image/jpeg" not in content_type:
+        video_hub.record_bad_frame()
+        raise HTTPException(status_code=400, detail="content-type must be image/jpeg")
+
+    payload = await request.body()
+    if len(payload) == 0:
+        video_hub.record_bad_frame()
+        raise HTTPException(status_code=400, detail="empty request body")
+
+    if len(payload) > _runtime_video_max_jpeg_bytes:
+        video_hub.record_bad_frame()
+        raise HTTPException(
+            status_code=400,
+            detail=f"jpeg payload exceeds max size ({_runtime_video_max_jpeg_bytes} bytes)",
+        )
+
+    if not _looks_like_jpeg(payload):
+        video_hub.record_bad_frame()
+        raise HTTPException(status_code=400, detail="invalid jpeg payload")
+
+    if _runtime_video_validate_decode and not can_decode_jpeg(payload):
+        video_hub.record_bad_frame()
+        raise HTTPException(status_code=400, detail="jpeg decode validation failed")
+
+    video_hub.set_jpeg(payload, now_monotonic_s=time.monotonic())
+    return {"ok": True, "size_bytes": len(payload)}
+
+
+@app.get("/video")
+async def video_stream() -> StreamingResponse:
+    if not _runtime_video_enabled:
+        raise HTTPException(status_code=503, detail="video streaming is disabled")
+
+    video_hub = _video_hub
+    if video_hub is None:
+        raise HTTPException(status_code=503, detail="video subsystem not ready")
+
+    boundary = "frame"
+    frame_period_s = max(0.001, 1.0 / _runtime_video_fps)
+
+    async def stream_generator() -> AsyncIterator[bytes]:
+        video_hub.register_client()
+        try:
+            while True:
+                now_s = time.monotonic()
+                frame = video_hub.get_fresh_jpeg(
+                    max_age_s=_runtime_video_frame_fresh_s,
+                    now_monotonic_s=now_s,
+                )
+                if frame is None:
+                    frame = _render_synthetic_frame(now_monotonic_s=now_s)
+
+                video_hub.record_frame_served(now_monotonic_s=now_s)
+                yield make_mjpeg_part(frame, boundary=boundary)
+                await asyncio.sleep(frame_period_s)
+        finally:
+            video_hub.unregister_client()
+
+    return StreamingResponse(
+        stream_generator(),
+        media_type=f"multipart/x-mixed-replace; boundary={boundary}",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 @app.websocket("/ws")
@@ -245,6 +366,59 @@ async def ws_endpoint(ws: WebSocket) -> None:
         pass
     finally:
         ws_manager.unregister(client_id)
+
+
+def _build_video_status(now_monotonic_s: float | None = None) -> dict[str, Any]:
+    now_s = float(now_monotonic_s) if now_monotonic_s is not None else time.monotonic()
+    video_hub = _video_hub
+    if video_hub is None:
+        return {
+            "video_enabled": _runtime_video_enabled,
+            "video_clients": 0,
+            "video_fps_est": 0.0,
+            "last_frame_age_s": None,
+            "frames_rx_ok": 0,
+            "frames_rx_bad": 0,
+        }
+
+    stats = video_hub.get_stats(now_monotonic_s=now_s)
+    return {
+        "video_enabled": _runtime_video_enabled,
+        "video_clients": int(stats["video_clients"]),
+        "video_fps_est": float(stats["video_fps_est"]),
+        "last_frame_age_s": stats["last_frame_age_s"],
+        "frames_rx_ok": int(stats["frames_rx_ok"]),
+        "frames_rx_bad": int(stats["frames_rx_bad"]),
+    }
+
+
+def _render_synthetic_frame(now_monotonic_s: float) -> bytes:
+    generator = _synthetic_jpeg_generator
+    if generator is None:
+        generator = SyntheticJpegGenerator(width=640, height=360)
+
+    link_status = state.get_link_status(
+        vis_fresh_s=_runtime_vis_fresh_s,
+        cmd_timeout_s=CMD_TIMEOUT_S,
+        cmd_hz=_runtime_cmd_hz,
+        tel_hz=_runtime_tel_hz,
+        now_monotonic_s=now_monotonic_s,
+    )
+    fc_connected = bool(link_status.get("fc_connected"))
+    vis_age_s = link_status.get("vis_age_s")
+    vis_age_label = f"{float(vis_age_s):.2f}s" if isinstance(vis_age_s, int | float) else "n/a"
+
+    return generator.render(
+        now_monotonic_s=now_monotonic_s,
+        lines=[
+            f"fc_connected={fc_connected}",
+            f"vis_age_s={vis_age_label}",
+        ],
+    )
+
+
+def _looks_like_jpeg(payload: bytes) -> bool:
+    return len(payload) >= 4 and payload.startswith(b"\xff\xd8") and payload.endswith(b"\xff\xd9")
 
 
 def _build_tel_ingestor_from_env(
