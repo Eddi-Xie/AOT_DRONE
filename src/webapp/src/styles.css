@@ -54,35 +54,60 @@ p {
 }
 
 .top-bar__badges {
-  align-items: flex-end;
+  align-items: center;
   display: flex;
-  flex-direction: column;
+  flex-wrap: wrap;
   gap: 0.45rem;
+  justify-content: flex-end;
 }
 
-.top-bar__age {
-  color: #334b5a;
-  font-size: 0.86rem;
-}
-
-.status-pill {
+.status-badge {
+  align-items: center;
   border: 1px solid #adc0cf;
   border-radius: 999px;
-  font-size: 0.78rem;
-  font-weight: 700;
-  padding: 0.28rem 0.7rem;
+  display: inline-flex;
+  gap: 0.38rem;
+  padding: 0.22rem 0.62rem;
 }
 
-.status-pill--ok {
+.status-badge__label {
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.status-badge__subtext {
+  font-size: 0.72rem;
+  opacity: 0.85;
+}
+
+.status-badge--neutral {
+  background: #eef3f7;
+  border-color: #bac8d5;
+  color: #2f4d62;
+}
+
+.status-badge--info {
+  background: #e7f4ff;
+  border-color: #87b7db;
+  color: #184e75;
+}
+
+.status-badge--good {
   background: #ddf6e7;
   border-color: #8abf9a;
   color: #135d2c;
 }
 
-.status-pill--warn {
+.status-badge--warn {
   background: #fff1dd;
   border-color: #e3b675;
   color: #7a4f0f;
+}
+
+.status-badge--bad {
+  background: #ffe8e4;
+  border-color: #db978f;
+  color: #7d2016;
 }
 
 .main-grid {
@@ -205,6 +230,29 @@ p {
 
 .warnings-panel {
   margin-bottom: 1rem;
+}
+
+.warnings-panel__header {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 0.7rem;
+}
+
+.warnings-panel__clear {
+  background: #f0f6fb;
+  border: 1px solid #adc0cf;
+  border-radius: 8px;
+  color: #224257;
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 700;
+  min-height: 32px;
+  padding: 0 0.7rem;
+}
+
+.warnings-panel__clear:hover {
+  background: #e3f0fa;
 }
 
 .warnings-panel__status-list,
@@ -354,6 +402,122 @@ p {
   font-family: "Iosevka", "Consolas", monospace;
   font-size: 0.74rem;
   margin-top: 0.35rem;
+}
+
+.tracking-summary-panel__header {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 0.65rem;
+}
+
+.tracking-summary-panel__row {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+
+.tracking-summary-panel__label {
+  color: #425d6e;
+  font-size: 0.82rem;
+}
+
+.tracking-summary-panel__value {
+  color: #1a3a4f;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.tracking-summary-panel__confidence-track {
+  background: #e6edf3;
+  border: 1px solid #c7d5e2;
+  border-radius: 999px;
+  height: 12px;
+  margin-bottom: 0.7rem;
+  overflow: hidden;
+}
+
+.tracking-summary-panel__confidence-fill {
+  background: linear-gradient(90deg, #29a56d, #3fc285);
+  border-radius: inherit;
+  height: 100%;
+}
+
+.tracking-summary-panel__confidence-fill.is-low {
+  background: linear-gradient(90deg, #d7943f, #e6ac58);
+}
+
+.tracking-summary-panel__aim {
+  align-items: center;
+  border-top: 1px solid #e1ebf3;
+  display: flex;
+  gap: 0.7rem;
+  justify-content: space-between;
+  margin-top: 0.65rem;
+  padding-top: 0.65rem;
+}
+
+.tracking-summary-panel__charts {
+  border-top: 1px solid #e1ebf3;
+  display: grid;
+  gap: 0.65rem;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  margin-top: 0.65rem;
+  padding-top: 0.65rem;
+}
+
+.tracking-summary-panel__chart-title {
+  color: #405b6d;
+  font-size: 0.76rem;
+  margin-bottom: 0.28rem;
+}
+
+.sparkline {
+  background: #f8fbfe;
+  border: 1px solid #d9e4ee;
+  border-radius: 8px;
+  display: block;
+  height: 52px;
+  width: 100%;
+}
+
+.sparkline__baseline {
+  fill: none;
+  stroke: #cfdce8;
+  stroke-width: 1;
+}
+
+.sparkline__line {
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.aim-indicator {
+  background: #f8fbfe;
+  border-radius: 10px;
+  height: 72px;
+  width: 72px;
+}
+
+.aim-indicator__frame {
+  fill: rgba(232, 243, 250, 0.55);
+  stroke: #9eb5c8;
+  stroke-width: 1.2;
+}
+
+.aim-indicator__axis {
+  stroke: #94aec2;
+  stroke-dasharray: 3 3;
+  stroke-width: 1;
+}
+
+.aim-indicator__dot {
+  fill: #1aa96f;
+  stroke: #0f5d3d;
+  stroke-width: 1.2;
 }
 
 .telemetry-panel .card-grid {
