@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   OverlaySource,
   TelUpdate,
@@ -21,6 +21,73 @@ interface OverlaySample {
   box: NormalizedBox;
   trackingState: number | null;
   confidence: number | null;
+}
+
+interface ComparableOverlayFields {
+  centerX: number | null;
+  centerY: number | null;
+  boundW: number | null;
+  boundH: number | null;
+  trackingState: number | null;
+  confidence: number | null;
+}
+
+function readVisComparableFields(latestVis: VisUpdate | null): ComparableOverlayFields {
+  return {
+    centerX: readNumber(latestVis?.loc_x),
+    centerY: readNumber(latestVis?.loc_y),
+    boundW: readNumber(latestVis?.bound_w),
+    boundH: readNumber(latestVis?.bound_h),
+    trackingState: readNumber(latestVis?.tracking_state),
+    confidence: readNumber(latestVis?.confidence),
+  };
+}
+
+function readTelComparableFields(latestTel: TelUpdate | null): ComparableOverlayFields {
+  return {
+    centerX: readNumber(latestTel?.target_x),
+    centerY: readNumber(latestTel?.target_y),
+    boundW: readNumber(latestTel?.bound_w),
+    boundH: readNumber(latestTel?.bound_h),
+    trackingState: readNumber(latestTel?.tracking_state),
+    confidence: readNumber(latestTel?.confidence),
+  };
+}
+
+function equalNullableNumber(left: number | null, right: number | null): boolean {
+  return left === right;
+}
+
+function equalComparableFields(
+  left: ComparableOverlayFields,
+  right: ComparableOverlayFields,
+): boolean {
+  return (
+    equalNullableNumber(left.centerX, right.centerX) &&
+    equalNullableNumber(left.centerY, right.centerY) &&
+    equalNullableNumber(left.boundW, right.boundW) &&
+    equalNullableNumber(left.boundH, right.boundH) &&
+    equalNullableNumber(left.trackingState, right.trackingState) &&
+    equalNullableNumber(left.confidence, right.confidence)
+  );
+}
+
+function areVideoPanelPropsEqual(previous: VideoPanelProps, next: VideoPanelProps): boolean {
+  if (previous.videoUrl !== next.videoUrl || previous.overlaySource !== next.overlaySource) {
+    return false;
+  }
+
+  if (next.overlaySource === "VIS") {
+    return equalComparableFields(
+      readVisComparableFields(previous.latestVis),
+      readVisComparableFields(next.latestVis),
+    );
+  }
+
+  return equalComparableFields(
+    readTelComparableFields(previous.latestTel),
+    readTelComparableFields(next.latestTel),
+  );
 }
 
 function getOverlaySample(
@@ -79,7 +146,32 @@ function getOverlaySample(
   };
 }
 
-export default function VideoPanel({
+function drawCenteredLabel(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  text: string,
+): void {
+  ctx.font = "700 16px Space Grotesk, sans-serif";
+  const textWidth = Math.ceil(ctx.measureText(text).width);
+  const padX = 12;
+  const padY = 8;
+  const boxWidth = textWidth + padX * 2;
+  const boxHeight = 32;
+  const x = (width - boxWidth) / 2;
+  const y = (height - boxHeight) / 2;
+
+  ctx.fillStyle = "rgba(5, 21, 35, 0.74)";
+  ctx.strokeStyle = "rgba(155, 194, 219, 0.65)";
+  ctx.lineWidth = 1;
+  ctx.fillRect(x, y, boxWidth, boxHeight);
+  ctx.strokeRect(x, y, boxWidth, boxHeight);
+
+  ctx.fillStyle = "#e7f7ff";
+  ctx.fillText(text, x + padX, y + boxHeight - padY);
+}
+
+function VideoPanel({
   videoUrl,
   overlaySource,
   latestVis,
@@ -186,15 +278,25 @@ export default function VideoPanel({
       return;
     }
 
-    const rect = normalizedToCanvasRect(overlaySample.box, width, height);
-    if (rect === null) {
+    const stateName = toTrackingStateName(overlaySample.trackingState).toUpperCase();
+    const isTracking = overlaySample.trackingState === TrackingState.Tracking;
+
+    if (!isTracking) {
+      drawCenteredLabel(ctx, width, height, stateName);
       return;
     }
 
-    const isTracking = overlaySample.trackingState === TrackingState.Tracking;
+    const rect = normalizedToCanvasRect(overlaySample.box, width, height);
+    if (rect === null || rect.width <= 0 || rect.height <= 0) {
+      drawCenteredLabel(ctx, width, height, "TRACKING");
+      return;
+    }
 
-    ctx.lineWidth = 1.2;
-    ctx.strokeStyle = "rgba(255, 255, 255, 0.55)";
+    const lowConfidence = overlaySample.confidence !== null && overlaySample.confidence < 0.5;
+    const stroke = lowConfidence ? "#e0a24a" : "#19c27e";
+
+    ctx.lineWidth = 1.4;
+    ctx.strokeStyle = "rgba(255, 255, 255, 0.42)";
     ctx.beginPath();
     ctx.moveTo(rect.centerX - 8, rect.centerY);
     ctx.lineTo(rect.centerX + 8, rect.centerY);
@@ -202,23 +304,34 @@ export default function VideoPanel({
     ctx.lineTo(rect.centerX, rect.centerY + 8);
     ctx.stroke();
 
-    if (isTracking && rect.width > 0 && rect.height > 0) {
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = "#19c27e";
-      ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = stroke;
+    ctx.strokeRect(rect.x, rect.y, rect.width, rect.height);
 
-      const label = `${trackingStateName} ${formatNumber(overlaySample.confidence, 2)}`;
-      ctx.font = "12px Space Grotesk, sans-serif";
-      const textWidth = Math.ceil(ctx.measureText(label).width);
-      const labelX = Math.max(0, Math.min(width - (textWidth + 14), rect.x));
-      const labelY = Math.max(16, rect.y - 6);
+    const lineA = `TRACKING ${overlaySource}`;
+    const lineB = `conf ${formatNumber(overlaySample.confidence, 2)}${lowConfidence ? " LOW CONF" : ""}`;
+    const lineC = `w ${formatNumber(overlaySample.box.boundW, 2)} h ${formatNumber(overlaySample.box.boundH, 2)}`;
 
-      ctx.fillStyle = "rgba(12, 35, 55, 0.8)";
-      ctx.fillRect(labelX, labelY - 14, textWidth + 10, 16);
-      ctx.fillStyle = "#f4fcff";
-      ctx.fillText(label, labelX + 5, labelY - 2);
-    }
-  }, [canvasSize, overlaySample, trackingStateName]);
+    ctx.font = "12px Space Grotesk, sans-serif";
+    const textWidth = Math.ceil(
+      Math.max(ctx.measureText(lineA).width, ctx.measureText(lineB).width, ctx.measureText(lineC).width),
+    );
+
+    const labelX = Math.max(0, Math.min(width - (textWidth + 14), rect.x));
+    const labelY = Math.max(42, rect.y - 8);
+    const lineHeight = 14;
+
+    ctx.fillStyle = "rgba(8, 27, 43, 0.84)";
+    ctx.strokeStyle = "rgba(149, 184, 210, 0.7)";
+    ctx.lineWidth = 1;
+    ctx.fillRect(labelX, labelY - lineHeight * 3, textWidth + 10, lineHeight * 3 + 6);
+    ctx.strokeRect(labelX, labelY - lineHeight * 3, textWidth + 10, lineHeight * 3 + 6);
+
+    ctx.fillStyle = "#e8f9ff";
+    ctx.fillText(lineA, labelX + 5, labelY - lineHeight * 2 + 2);
+    ctx.fillText(lineB, labelX + 5, labelY - lineHeight + 2);
+    ctx.fillText(lineC, labelX + 5, labelY + 2);
+  }, [canvasSize, overlaySample, overlaySource]);
 
   return (
     <section className="panel video-panel">
@@ -272,3 +385,5 @@ export default function VideoPanel({
     </section>
   );
 }
+
+export default memo(VideoPanel, areVideoPanelPropsEqual);
