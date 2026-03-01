@@ -14,24 +14,17 @@ def test_video_stream_returns_mjpeg_part(monkeypatch) -> None:
     monkeypatch.setenv("BACKEND_VIDEO_FPS", "5")
 
     with TestClient(app) as client:
-        with client.stream("GET", "/video") as response:
-            assert response.status_code == 200
-            content_type = response.headers.get("content-type", "")
-            assert content_type.startswith("multipart/x-mixed-replace")
-            assert (
-                response.headers.get("cache-control")
-                == "no-store, no-cache, must-revalidate, max-age=0"
-            )
-            assert response.headers.get("pragma") == "no-cache"
-            assert response.headers.get("expires") == "0"
-
-            buffer = b""
-            chunks = response.iter_bytes()
-            for _ in range(5):
-                chunk = next(chunks)
-                buffer += chunk
-                if b"Content-Type: image/jpeg" in buffer and b"\r\n\r\n" in buffer:
-                    break
+        response = client.get("/video", params={"max_parts": 1})
+        assert response.status_code == 200
+        content_type = response.headers.get("content-type", "")
+        assert content_type.startswith("multipart/x-mixed-replace")
+        assert (
+            response.headers.get("cache-control")
+            == "no-store, no-cache, must-revalidate, max-age=0"
+        )
+        assert response.headers.get("pragma") == "no-cache"
+        assert response.headers.get("expires") == "0"
+        buffer = response.content
 
     assert b"--frame" in buffer
     assert b"Content-Type: image/jpeg" in buffer

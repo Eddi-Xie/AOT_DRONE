@@ -7,7 +7,7 @@ import time
 from collections.abc import AsyncIterator, Callable
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -286,7 +286,9 @@ async def post_frame(request: Request) -> dict[str, Any]:
 
 
 @app.get("/video")
-async def video_stream() -> StreamingResponse:
+async def video_stream(
+    max_parts: int | None = Query(default=None, ge=1, le=1000),
+) -> StreamingResponse:
     if not _runtime_video_enabled:
         raise HTTPException(status_code=503, detail="video streaming is disabled")
 
@@ -300,6 +302,7 @@ async def video_stream() -> StreamingResponse:
     async def stream_generator() -> AsyncIterator[bytes]:
         video_hub.register_client()
         try:
+            emitted_parts = 0
             while True:
                 now_s = time.monotonic()
                 frame = video_hub.get_fresh_jpeg(
@@ -311,6 +314,9 @@ async def video_stream() -> StreamingResponse:
 
                 video_hub.record_frame_served(now_monotonic_s=now_s)
                 yield make_mjpeg_part(frame, boundary=boundary)
+                emitted_parts += 1
+                if max_parts is not None and emitted_parts >= max_parts:
+                    break
                 await asyncio.sleep(frame_period_s)
         finally:
             video_hub.unregister_client()
