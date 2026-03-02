@@ -81,9 +81,7 @@ def startup() -> None:
     _runtime_vis_fresh_s = _read_env_float("BACKEND_VIS_FRESH_S", 0.25)
     _runtime_video_enabled = _read_env_bool("BACKEND_VIDEO_ENABLED", True)
     _runtime_video_fps = max(0.5, _read_env_float("BACKEND_VIDEO_FPS", 10.0))
-    _runtime_video_max_jpeg_bytes = max(
-        1024, _read_env_int("BACKEND_VIDEO_MAX_JPEG_BYTES", 200_000)
-    )
+    _runtime_video_max_jpeg_bytes = max(1, _read_env_int("BACKEND_VIDEO_MAX_JPEG_BYTES", 200_000))
     _runtime_video_frame_fresh_s = max(0.0, _read_env_float("BACKEND_VIDEO_FRAME_FRESH_S", 1.0))
     _runtime_video_validate_decode = _read_env_bool("BACKEND_VIDEO_VALIDATE_DECODE", False)
     _video_hub = VideoFrameHub()
