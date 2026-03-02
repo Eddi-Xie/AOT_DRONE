@@ -56,6 +56,15 @@ Install the required libraries for backend.
 python -m pip install -r src/backend/requirements.txt
 ```
 
+Video stream defaults and optional strict decode validation:
+```bash
+export BACKEND_VIDEO_ENABLED=1
+export BACKEND_VIDEO_FPS=10
+export BACKEND_VIDEO_MAX_JPEG_BYTES=200000
+export BACKEND_VIDEO_FRAME_FRESH_S=1.0
+export BACKEND_VIDEO_VALIDATE_DECODE=0
+```
+
 The repository includes reproducible helper scripts:
 
 ```bash
@@ -123,6 +132,26 @@ Optional one-shot smoke check (requires `fc_app` running):
 
 ```bash
 python scripts/dev/fc_protocol_smoke.py
+```
+
+Backend MJPEG smoke checks:
+
+```bash
+curl -i http://127.0.0.1:8000/video
+```
+
+Push a local JPEG into backend frame ingest:
+
+```bash
+python scripts/dev/push_frame.py /path/to/frame.jpg
+```
+
+Equivalent curl:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/frame \\
+  -H 'Content-Type: image/jpeg' \\
+  --data-binary '@/path/to/frame.jpg'
 ```
 
 ---

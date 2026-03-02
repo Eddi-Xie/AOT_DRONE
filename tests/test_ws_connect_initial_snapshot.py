@@ -40,6 +40,12 @@ def test_ws_connect_sends_initial_link_status(monkeypatch) -> None:
         "tel_age_s",
         "tel_rx_ok",
         "tel_rx_bad",
+        "video_enabled",
+        "video_clients",
+        "video_fps_est",
+        "last_frame_age_s",
+        "frames_rx_ok",
+        "frames_rx_bad",
         "vis_fresh_s",
         "cmd_timeout_s",
         "cmd_hz",
@@ -69,7 +75,33 @@ def test_ws_connect_sends_initial_link_status(monkeypatch) -> None:
     assert data["tel_rx_ok"] == 0
     assert data["tel_rx_bad"] == 0
 
+    assert isinstance(data["video_enabled"], bool)
+    assert isinstance(data["video_clients"], int)
+    assert isinstance(data["video_fps_est"], float)
+    assert data["last_frame_age_s"] is None
+    assert data["frames_rx_ok"] == 0
+    assert data["frames_rx_bad"] == 0
+
     assert isinstance(data["vis_fresh_s"], float)
     assert isinstance(data["cmd_timeout_s"], float)
     assert isinstance(data["cmd_hz"], float)
     assert isinstance(data["tel_hz"], float)
+
+
+def test_ws_link_status_contains_video_fields_when_video_disabled(monkeypatch) -> None:
+    require_udp_bind_or_skip()
+    configure_backend_ws_test_env(monkeypatch, ws_link_hz=4.0)
+    monkeypatch.setenv("BACKEND_VIDEO_ENABLED", "0")
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws") as ws:
+            first = ws.receive_json()
+
+    assert first["event"] == "LINK_STATUS"
+    data = first["data"]
+    assert data["video_enabled"] is False
+    assert isinstance(data["video_clients"], int)
+    assert isinstance(data["video_fps_est"], float)
+    assert "last_frame_age_s" in data
+    assert isinstance(data["frames_rx_ok"], int)
+    assert isinstance(data["frames_rx_bad"], int)
