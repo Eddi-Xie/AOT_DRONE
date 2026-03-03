@@ -46,7 +46,14 @@ class _StepClock:
 def test_vis_hz_monotonic_throttle_emits_expected_count() -> None:
     publisher = _CollectPublisher()
     emitted = run_loop(
-        config=VisionConfig(source="webcam:0", vis_hz=2.0, max_frames=10, no_output=True),
+        config=VisionConfig(
+            source="webcam:0",
+            vis_hz=2.0,
+            max_frames=10,
+            no_output=True,
+            no_frame_push=True,
+            no_vis_udp=True,
+        ),
         publisher=publisher,
         frame_source=_FakeSource(num_frames=10),
         clock=_StepClock(start_s=0.0, step_s=0.1),
@@ -63,7 +70,14 @@ def test_preview_guard_raises_on_headless_linux(monkeypatch: pytest.MonkeyPatch)
 
     with pytest.raises(RuntimeError, match="no GUI display"):
         run_loop(
-            config=VisionConfig(source="webcam:0", preview=True, max_frames=1, no_output=True),
+            config=VisionConfig(
+                source="webcam:0",
+                preview=True,
+                max_frames=1,
+                no_output=True,
+                no_frame_push=True,
+                no_vis_udp=True,
+            ),
             publisher=_CollectPublisher(),
             frame_source=_FakeSource(num_frames=1),
             clock=_StepClock(start_s=0.0, step_s=0.1),
