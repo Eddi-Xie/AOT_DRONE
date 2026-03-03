@@ -1,80 +1,59 @@
-# Vision Runner (PR-V2)
+# Vision Runner (PR-V3)
 
-PR-V2 extends the local runner so Vision can:
-- read real frames from `webcam:<index>` or `file:<path>`
-- push JPEG frames to backend `POST /api/frame`
-- send VIS datagrams to backend over UDP (`127.0.0.1:9003`)
+PR-V3 extends the local runner with a real detector + tracker pipeline while keeping PR-V2 transport behavior:
+- reads frames from `webcam:<index>` or `file:<path>`
+- pushes JPEG frames to backend `POST /api/frame`
+- sends VIS datagrams to backend over UDP (`127.0.0.1:9003`)
 
-It keeps PR-V1 stdout output (`VIS` JSON lines) unless disabled.
-
-## Run
-
-Install vision runtime dependencies first:
+## Install
 
 ```bash
 python -m pip install -r src/vision/requirements.txt
 ```
 
+## Modes
+
+`--mode pattern|detect` is available, with default `detect`.
+
+### Detect mode (YOLO + tracker)
+
 ```bash
-python -m src.vision.main --source webcam:0 --pattern sweep
+python -m src.vision.main --source webcam:0 --mode detect --model-path yolov8n.pt
 ```
 
-Common options:
+### Pattern mode (PR-V2 synthetic patterns)
+
+```bash
+python -m src.vision.main --source webcam:0 --mode pattern --pattern sweep
+```
+
+## Common transport flags (unchanged)
 - `--backend-http` (default `http://127.0.0.1:8000`)
 - `--backend-frame-endpoint` (default `/api/frame`)
 - `--vis-udp-host` / `--vis-udp-port` (default `127.0.0.1:9003`)
 - `--vis-hz` (default `20`)
 - `--frame-fps` (default `10`)
 - `--jpeg-quality` (default `80`)
-- `--pattern none|sweep|lose|reacquire` (default `none`)
 - `--no-frame-push` disables HTTP frame push
 - `--no-vis-udp` disables UDP VIS send
 - `--no-output` disables stdout publishing
 
-Supported env overrides:
-- `VISION_BACKEND_HTTP`
-- `VISION_VIS_UDP_HOST`
-- `VISION_VIS_UDP_PORT`
-- `VISION_VIS_HZ`
-- `VISION_FRAME_FPS`
-- `VISION_JPEG_QUALITY`
+## Detect mode flags
+- `--model-path` (default `yolov8n.pt`)
+- `--target-class` (default `0`, person in COCO)
+- `--conf-threshold` (default `0.5`)
+- `--tracker none|kcf|csrt` (default `kcf`)
+- `--infer-width` (default `640`, aspect-preserving)
+- `--infer-size` (optional square size, overrides `--infer-width`)
+- `--detect-every-n` (default `1`)
+- `--detect-hold-n` (default `30`)
+- `--search-n` (default `30`)
+- `--desired-cx` / `--desired-cy` (default `0.5`, `0.5`)
 
-`BACKEND_VIDEO_MAX_JPEG_BYTES` is respected for frame-size enforcement (default `200000`).
+## Pattern mode flags
+- `--pattern none|sweep|lose|reacquire` (default `none`)
 
-## End-to-End Smoke Checklist
-
-1. Start backend:
-
-```bash
-uvicorn src.backend.app:app --host 127.0.0.1 --port 8000 --reload
-```
-
-2. Start webapp and open the UI:
-
-```bash
-cd src/webapp
-npm install
-npm run dev
-```
-
-3. Run vision on the laptop:
-
-```bash
-cd /Users/eddixie/Documents/VSCode/UBC/AOT_DRONE_V2/AOT_DRONE
-python -m src.vision.main --source webcam:0 --pattern sweep
-```
-
-4. Live smoke commands:
-
-```bash
-curl -s http://127.0.0.1:8000/api/status
-curl -s http://127.0.0.1:8000/api/status
-```
-
-`frames_rx_ok` should increase across calls while Vision is running.
-
-5. Verify:
-- UI video panel displays backend `/video` frames (not synthetic fallback/404).
-- `/api/status` shows `frames_rx_ok` increasing and `frames_rx_bad` stable.
-- `VIS_UPDATE` values arrive and tracking summary updates.
-- Overlay box moves as the sweep pattern runs.
+## Notes
+- Detect mode fails fast with a clear error if `ultralytics` is missing.
+- Pattern mode does not require `ultralytics`.
+- VIS UDP payload semantics stay strict: if state is not `Tracking`, `loc_x/loc_y/bound_w/bound_h/confidence` are sent as exact `0.0`.
