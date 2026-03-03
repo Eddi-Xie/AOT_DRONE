@@ -18,6 +18,7 @@ Monorepo for the drone control stack:
 ## Reproducibility
 - Pinned Python tooling: `requirements-dev.txt`
 - Pinned backend runtime deps: `src/backend/requirements.txt`
+- Pinned vision runtime deps: `src/vision/requirements.txt`
 - CI-equivalent local check command: `./scripts/dev/runall.sh`
 
 Install dependencies before running lint/tests:
@@ -26,22 +27,27 @@ Install dependencies before running lint/tests:
 python -m pip install --upgrade pip==24.3.1
 python -m pip install -r requirements-dev.txt
 python -m pip install -r src/backend/requirements.txt
+python -m pip install -r src/vision/requirements.txt
 ```
 
 `./scripts/dev/runall.sh` now checks `ruff` availability explicitly and exits with a clear error if dev tooling is missing.
 
-## Vision Local Runner (PR-V1)
-Run the local vision scaffold (stub detector/tracker) with newline-delimited VIS JSON output:
+## Vision Local Runner (PR-V2)
+Run the local vision runner with real frame capture + backend outputs:
 
 ```bash
-python -m src.vision.main --source webcam:0 --preview
-python -m src.vision.main --source file:assets/test.mp4 --vis-hz 20 --max-frames 300
+python -m src.vision.main --source webcam:0 --pattern sweep --preview
+python -m src.vision.main --source file:assets/test.mp4 --vis-hz 20 --frame-fps 10 --max-frames 300
 ```
 
 Optional outputs:
 - `--no-output` disables stdout VIS emission
 - `--output jsonl:logs/vis.jsonl` writes VIS messages to a JSONL file
-- `--vis-hz` uses monotonic time-based throttling (first frame emits immediately)
+- `--vis-hz` and `--frame-fps` use independent monotonic schedules
+- `--no-vis-udp` disables VIS UDP send
+- `--no-frame-push` disables frame HTTP push
+
+See `src/vision/README.md` for full CLI/config options and end-to-end smoke steps.
 
 Run vision/test commands from the repository root so `src.*` imports resolve consistently.
 

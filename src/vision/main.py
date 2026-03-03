@@ -10,15 +10,36 @@ from typing import Any, Protocol
 
 from .camera import CameraSource
 from .detector import Detector, DummyDetector
+from .frame_pusher import FramePusher
+from .patterns import PATTERN_CHOICES, PatternGenerator
 from .publisher import Publisher, create_publisher
 from .tracker import SimpleTracker
-from .types import VisMessage
+from .types import VisMessage, VisState, clamp01
+from .udp_vis_sender import VisUdpSender
+
+_TRACKING_STATE_TO_CODE = {
+    VisState.NO_TARGET: 1,
+    VisState.TARGET_DETECTED: 2,
+    VisState.TRACKING: 3,
+    VisState.SEARCHING: 4,
+}
+_TRACKING_STATE_TRACKING = 3
 
 
 @dataclass(frozen=True)
 class VisionConfig:
     source: str = "webcam:0"
-    vis_hz: float = 0.0
+    vis_hz: float = 20.0
+    frame_fps: float = 10.0
+    jpeg_quality: int = 80
+    backend_http: str = "http://127.0.0.1:8000"
+    backend_frame_endpoint: str = "/api/frame"
+    backend_video_max_jpeg_bytes: int = 200_000
+    vis_udp_host: str = "127.0.0.1"
+    vis_udp_port: int = 9003
+    pattern: str = "none"
+    no_frame_push: bool = False
+    no_vis_udp: bool = False
     preview: bool = False
     max_frames: int | None = None
     detect_hold_n: int = 30
@@ -35,15 +56,68 @@ class FrameSource(Protocol):
     def release(self) -> None: ...
 
 
+class VisSender(Protocol):
+    def send(self, vis_dict: dict[str, Any]) -> None: ...
+
+    def close(self) -> None: ...
+
+
+class FramePushSink(Protocol):
+    def push_frame(self, frame: Any, quality: int) -> bool: ...
+
+    def close(self) -> None: ...
+
+
 def parse_args(argv: Sequence[str] | None = None) -> VisionConfig:
     parser = argparse.ArgumentParser(description="Local vision runner scaffold")
     parser.add_argument("--source", default="webcam:0", help="webcam:<index> or file:<path>")
     parser.add_argument(
+        "--backend-http",
+        default=_read_env_str("VISION_BACKEND_HTTP", "http://127.0.0.1:8000"),
+        help="backend base URL for frame push",
+    )
+    parser.add_argument(
+        "--backend-frame-endpoint",
+        default="/api/frame",
+        help="backend frame ingest endpoint path",
+    )
+    parser.add_argument(
+        "--vis-udp-host",
+        default=_read_env_str("VISION_VIS_UDP_HOST", "127.0.0.1"),
+        help="VIS UDP destination host",
+    )
+    parser.add_argument(
+        "--vis-udp-port",
+        type=int,
+        default=_read_env_int("VISION_VIS_UDP_PORT", 9003),
+        help="VIS UDP destination port",
+    )
+    parser.add_argument(
         "--vis-hz",
         type=float,
-        default=0.0,
+        default=_read_env_float("VISION_VIS_HZ", 20.0),
         help="Monotonic time-based VIS publish cap. 0 means publish every frame.",
     )
+    parser.add_argument(
+        "--frame-fps",
+        type=float,
+        default=_read_env_float("VISION_FRAME_FPS", 10.0),
+        help="Monotonic frame push cap. 0 means push every frame.",
+    )
+    parser.add_argument(
+        "--jpeg-quality",
+        type=int,
+        default=_read_env_int("VISION_JPEG_QUALITY", 80),
+        help="JPEG quality for backend frame ingest (1..100).",
+    )
+    parser.add_argument(
+        "--pattern",
+        choices=PATTERN_CHOICES,
+        default="none",
+        help="synthetic VIS pattern mode for local validation",
+    )
+    parser.add_argument("--no-frame-push", action="store_true", help="disable HTTP frame push")
+    parser.add_argument("--no-vis-udp", action="store_true", help="disable VIS UDP send")
     parser.add_argument("--preview", action="store_true", help="show local preview window")
     parser.add_argument("--max-frames", type=int, default=None, help="stop after N frames")
     parser.add_argument(
@@ -68,6 +142,12 @@ def parse_args(argv: Sequence[str] | None = None) -> VisionConfig:
 
     if args.vis_hz < 0:
         raise ValueError("--vis-hz must be >= 0")
+    if args.frame_fps < 0:
+        raise ValueError("--frame-fps must be >= 0")
+    if args.jpeg_quality < 1 or args.jpeg_quality > 100:
+        raise ValueError("--jpeg-quality must be in [1, 100]")
+    if args.vis_udp_port <= 0 or args.vis_udp_port > 65535:
+        raise ValueError("--vis-udp-port must be in [1, 65535]")
     if args.max_frames is not None and args.max_frames <= 0:
         raise ValueError("--max-frames must be > 0")
     if args.detect_hold_n < 0:
@@ -77,7 +157,17 @@ def parse_args(argv: Sequence[str] | None = None) -> VisionConfig:
 
     return VisionConfig(
         source=args.source,
+        backend_http=args.backend_http,
+        backend_frame_endpoint=args.backend_frame_endpoint,
+        vis_udp_host=args.vis_udp_host,
+        vis_udp_port=args.vis_udp_port,
         vis_hz=args.vis_hz,
+        frame_fps=args.frame_fps,
+        jpeg_quality=args.jpeg_quality,
+        pattern=args.pattern,
+        no_frame_push=args.no_frame_push,
+        no_vis_udp=args.no_vis_udp,
+        backend_video_max_jpeg_bytes=_read_env_int("BACKEND_VIDEO_MAX_JPEG_BYTES", 200_000),
         preview=args.preview,
         max_frames=args.max_frames,
         detect_hold_n=args.detect_hold_n,
@@ -94,6 +184,8 @@ def run_loop(
     publisher: Publisher | None = None,
     frame_source: FrameSource | None = None,
     clock: Callable[[], float] | None = None,
+    vis_sender: VisSender | None = None,
+    frame_pusher: FramePushSink | None = None,
 ) -> int:
     detector_impl = detector or DummyDetector()
     tracker_impl = tracker or SimpleTracker(
@@ -107,6 +199,27 @@ def run_loop(
     source = frame_source or CameraSource.open(config.source)
     now_fn = clock or time.monotonic
 
+    pattern_generator = PatternGenerator(config.pattern) if config.pattern != "none" else None
+
+    vis_sender_impl: VisSender | None
+    if config.no_vis_udp:
+        vis_sender_impl = None
+    else:
+        vis_sender_impl = vis_sender or VisUdpSender(
+            host=config.vis_udp_host,
+            port=config.vis_udp_port,
+        )
+
+    frame_pusher_impl: FramePushSink | None
+    if config.no_frame_push:
+        frame_pusher_impl = None
+    else:
+        frame_pusher_impl = frame_pusher or FramePusher(
+            backend_http=config.backend_http,
+            frame_endpoint=config.backend_frame_endpoint,
+            max_jpeg_bytes=config.backend_video_max_jpeg_bytes,
+        )
+
     cv2_module: Any | None = None
     draw_overlay = None
     if config.preview:
@@ -118,10 +231,13 @@ def run_loop(
         cv2_module = cv2_module_local
         draw_overlay = draw_overlay_local
 
-    emit_interval_s = (1.0 / config.vis_hz) if config.vis_hz > 0 else 0.0
-    next_emit_ts = 0.0
+    vis_interval_s = (1.0 / config.vis_hz) if config.vis_hz > 0 else 0.0
+    frame_interval_s = (1.0 / config.frame_fps) if config.frame_fps > 0 else 0.0
+    next_vis_emit_ts = 0.0
+    next_frame_push_ts = 0.0
     frame_id = 0
     emitted_count = 0
+    vis_seq = 1
 
     try:
         while True:
@@ -131,10 +247,22 @@ def run_loop(
 
             frame_id += 1
             img_h, img_w = frame.shape[:2]
-            detections = list(detector_impl.detect(frame, frame_id=frame_id))
-            tracker_result = tracker_impl.update(detections=detections, img_w=img_w, img_h=img_h)
+            if pattern_generator is None:
+                detections = list(detector_impl.detect(frame, frame_id=frame_id))
+                tracker_result = tracker_impl.update(
+                    detections=detections, img_w=img_w, img_h=img_h
+                )
+            else:
+                tracker_result = pattern_generator.update(frame_id=frame_id)
 
             now_s = now_fn()
+            if frame_pusher_impl is not None and (
+                frame_interval_s == 0.0 or now_s >= next_frame_push_ts
+            ):
+                frame_pusher_impl.push_frame(frame=frame, quality=config.jpeg_quality)
+                if frame_interval_s > 0.0:
+                    next_frame_push_ts = now_s + frame_interval_s
+
             message = VisMessage(
                 ts=now_s,
                 state=tracker_result.state,
@@ -146,11 +274,23 @@ def run_loop(
                 img_wh=(img_w, img_h),
             )
 
-            if emit_interval_s == 0.0 or now_s >= next_emit_ts:
+            if vis_interval_s == 0.0 or now_s >= next_vis_emit_ts:
                 publisher_impl.publish(message)
                 emitted_count += 1
-                if emit_interval_s > 0.0:
-                    next_emit_ts = now_s + emit_interval_s
+
+                if vis_sender_impl is not None:
+                    vis_payload = _build_vis_payload(
+                        seq=vis_seq,
+                        timestamp_s=now_s,
+                        state=tracker_result.state,
+                        bbox=tracker_result.bbox,
+                        confidence=tracker_result.conf,
+                    )
+                    vis_sender_impl.send(vis_payload)
+                    vis_seq += 1
+
+                if vis_interval_s > 0.0:
+                    next_vis_emit_ts = now_s + vis_interval_s
 
             if config.preview and cv2_module is not None and draw_overlay is not None:
                 frame_with_overlay = draw_overlay(
@@ -169,8 +309,13 @@ def run_loop(
             if config.max_frames is not None and frame_id >= config.max_frames:
                 break
     finally:
+        _emit_shutdown_summary(vis_sender=vis_sender_impl, frame_pusher=frame_pusher_impl)
         source.release()
         publisher_impl.close()
+        if frame_pusher_impl is not None:
+            frame_pusher_impl.close()
+        if vis_sender_impl is not None:
+            vis_sender_impl.close()
         if config.preview and cv2_module is not None:
             cv2_module.destroyAllWindows()
 
@@ -207,6 +352,101 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"vision runner failed: {exc}", file=sys.stderr)
         return 1
     return 0
+
+
+def _build_vis_payload(
+    seq: int,
+    timestamp_s: float,
+    state: VisState,
+    bbox: Any,
+    confidence: float,
+) -> dict[str, Any]:
+    tracking_state = _TRACKING_STATE_TO_CODE[state]
+    if tracking_state != _TRACKING_STATE_TRACKING:
+        return {
+            "type": "VIS",
+            "seq": int(seq),
+            "timestamp_s": float(timestamp_s),
+            "tracking_state": tracking_state,
+            "loc_x": 0.0,
+            "loc_y": 0.0,
+            "bound_w": 0.0,
+            "bound_h": 0.0,
+            "confidence": 0.0,
+        }
+
+    loc_x = max(-1.0, min(1.0, ((float(bbox.cx) - 0.5) * 2.0)))
+    loc_y = max(-1.0, min(1.0, ((0.5 - float(bbox.cy)) * 2.0)))
+    return {
+        "type": "VIS",
+        "seq": int(seq),
+        "timestamp_s": float(timestamp_s),
+        "tracking_state": tracking_state,
+        "loc_x": loc_x,
+        "loc_y": loc_y,
+        "bound_w": clamp01(bbox.w),
+        "bound_h": clamp01(bbox.h),
+        "confidence": clamp01(confidence),
+    }
+
+
+def _read_env_str(name: str, default: str) -> str:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    value_stripped = value.strip()
+    return value_stripped if value_stripped else default
+
+
+def _read_env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return int(default)
+    value_stripped = value.strip()
+    if not value_stripped:
+        return int(default)
+    return int(value_stripped)
+
+
+def _read_env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None:
+        return float(default)
+    value_stripped = value.strip()
+    if not value_stripped:
+        return float(default)
+    return float(value_stripped)
+
+
+def _emit_shutdown_summary(
+    vis_sender: VisSender | None, frame_pusher: FramePushSink | None
+) -> None:
+    if vis_sender is None and frame_pusher is None:
+        return
+
+    vis_ok = _counter_or_zero(vis_sender, "sent_ok")
+    vis_fail = _counter_or_zero(vis_sender, "sent_fail")
+    vis_drop = _counter_or_zero(vis_sender, "dropped_oversize")
+    frame_ok = _counter_or_zero(frame_pusher, "push_ok")
+    frame_fail = _counter_or_zero(frame_pusher, "push_fail")
+    frame_drop = _counter_or_zero(frame_pusher, "dropped_oversize")
+    print(
+        "vision summary: "
+        f"vis_udp_ok={vis_ok} vis_udp_fail={vis_fail} vis_udp_drop_oversize={vis_drop} "
+        f"frame_push_ok={frame_ok} frame_push_fail={frame_fail} "
+        f"frame_drop_oversize={frame_drop}",
+        file=sys.stderr,
+    )
+
+
+def _counter_or_zero(instance: object | None, attr: str) -> int:
+    if instance is None:
+        return 0
+    value = getattr(instance, attr, 0)
+    try:
+        return int(value)
+    except Exception:
+        return 0
 
 
 if __name__ == "__main__":
