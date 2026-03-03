@@ -32,11 +32,109 @@ python -m pip install -r src/vision/requirements.txt
 
 `./scripts/dev/runall.sh` now checks `ruff` availability explicitly and exits with a clear error if dev tooling is missing.
 
+## How To Run
+
+Run all commands from the repository root unless noted.
+
+### 1) One-time local setup
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip==26.0.1
+python -m pip install -r requirements-dev.txt
+python -m pip install -r src/backend/requirements.txt
+python -m pip install -r src/vision/requirements.txt
+
+cd src/webapp
+npm install
+cd ../..
+
+cmake -S . -B build
+cmake --build build -j
+```
+
+### 2) Runtime environment (bash/zsh)
+
+```bash
+source .venv/bin/activate
+
+# Backend runtime
+export BACKEND_TEL_HOST=127.0.0.1
+export BACKEND_TEL_PORT=9001
+export BACKEND_VIS_HOST=127.0.0.1
+export BACKEND_VIS_PORT=9003
+export BACKEND_FC_HOST=127.0.0.1
+export BACKEND_FC_PORT=9002
+export BACKEND_CMD_BRIDGE_ENABLED=1
+export BACKEND_TEL_INGEST_ENABLED=1
+export BACKEND_VIS_INGEST_ENABLED=1
+export BACKEND_VIDEO_ENABLED=1
+
+# Vision runtime
+export VISION_BACKEND_HTTP=http://127.0.0.1:8000
+export VISION_VIS_UDP_HOST=127.0.0.1
+export VISION_VIS_UDP_PORT=9003
+
+# Webapp runtime (read by Vite)
+export VITE_BACKEND_HTTP_URL=http://127.0.0.1:8000
+export VITE_BACKEND_WS_URL=ws://127.0.0.1:8000/ws
+export VITE_VIDEO_URL=/video
+export VITE_OVERLAY_SOURCE=VIS
+```
+
+### 3) Start full stack (4 terminals)
+
+Terminal 1: backend
+
+```bash
+source .venv/bin/activate
+python -m uvicorn src.backend.app:app --host 127.0.0.1 --port 8000
+```
+
+Terminal 2: FC app
+
+```bash
+./build/src/fc/fc_app
+```
+
+Terminal 3: vision (detect person mode, using webcam/phone camera)
+
+```bash
+source .venv/bin/activate
+python -m src.vision.main --source webcam:0 --mode detect --model-path yolov8n.pt --target-class 0 --preview --conf-threshold 0.25 --detect-hold-n 5 --infer-size 640
+```
+
+Terminal 4: webapp
+
+```bash
+cd src/webapp
+npm run dev
+```
+
+### 4) Quick smoke checks
+
+```bash
+curl -s http://127.0.0.1:8000/health
+curl -s http://127.0.0.1:8000/api/status | head -c 400 && echo
+python scripts/dev/vision_replay.py --pattern sweep --count 20
+```
+
+### 5) Test commands
+
+```bash
+pytest -q
+pytest -q tests/integration
+./scripts/dev/e2e.sh
+RUN_FULL_E2E=1 ./scripts/dev/e2e.sh
+./scripts/dev/runall.sh
+```
+
 ## Vision Local Runner (PR-V2)
 Run the local vision runner with real frame capture + backend outputs:
 
 ```bash
-python -m src.vision.main --source webcam:0 --pattern sweep --preview
+python -m src.vision.main --source webcam:0 --mode pattern --pattern sweep --preview
 python -m src.vision.main --source file:assets/test.mp4 --vis-hz 20 --frame-fps 10 --max-frames 300
 ```
 
