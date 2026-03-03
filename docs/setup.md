@@ -56,6 +56,11 @@ Install the required libraries for backend.
 python -m pip install -r src/backend/requirements.txt
 ```
 
+Install the required libraries for vision runtime.
+```bash
+python -m pip install -r src/vision/requirements.txt
+```
+
 Video stream defaults and optional strict decode validation:
 ```bash
 export BACKEND_VIDEO_ENABLED=1
