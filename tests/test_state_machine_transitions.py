@@ -94,3 +94,29 @@ def test_pipeline_state_machine_core_transitions() -> None:
         VisState.NO_TARGET,
     ]
     assert tracker.init_calls == 2
+
+
+def test_tracking_prefers_detector_when_tracker_fails_same_frame() -> None:
+    detector = _SequenceDetector(
+        by_frame=(
+            (_det(100.0, 100.0, 80.0, 80.0),),
+            (_det(102.0, 102.0, 80.0, 80.0),),
+            (_det(120.0, 120.0, 80.0, 80.0),),
+        )
+    )
+    tracker = _SequenceTracker(updates=((False, None),))
+    pipeline = VisionPipeline(
+        detector=detector,
+        tracker=tracker,
+        config=VisionPipelineConfig(detect_hold_n=1, search_n=2, detect_every_n=1),
+    )
+
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    states = [pipeline.process_frame(frame=frame, frame_id=i).state for i in range(1, 4)]
+
+    assert states == [
+        VisState.TARGET_DETECTED,
+        VisState.TRACKING,
+        VisState.TRACKING,
+    ]
+    assert tracker.init_calls == 2
