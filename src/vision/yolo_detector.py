@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import sys
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -33,14 +35,24 @@ class YoloDetector(Detector):
             from ultralytics import YOLO
         except Exception as exc:  # pragma: no cover - optional runtime dependency
             raise RuntimeError(
-                "detect mode requires 'ultralytics'; " "install src/vision/requirements.txt"
+                "detect mode requires 'ultralytics'; install src/vision/requirements.txt"
             ) from exc
+
+        resolved_model_spec, model_source = _resolve_model_spec(model_path)
+        print(f"vision detect: YOLO model source={model_source}", file=sys.stderr)
 
         self.target_class = int(target_class)
         self.conf_threshold = float(conf_threshold)
         self.infer_width = int(infer_width)
         self.infer_size = int(infer_size) if infer_size is not None else None
-        self._model = YOLO(model_path)
+        self.model_spec = resolved_model_spec
+        try:
+            self._model = YOLO(self.model_spec)
+        except Exception as exc:
+            raise RuntimeError(
+                "failed to load YOLO model "
+                f"from --model-path={model_path!r} (resolved={self.model_spec!r})"
+            ) from exc
 
     def detect(self, frame: np.ndarray, frame_id: int) -> Sequence[Detection]:
         del frame_id
@@ -118,3 +130,43 @@ def _to_list(value: Any) -> list[Any] | None:
     if not isinstance(value, list):
         return None
     return value
+
+
+def _resolve_model_spec(
+    model_path: str,
+    *,
+    cwd: Path | None = None,
+    repo_root: Path | None = None,
+) -> tuple[str, str]:
+    raw_path = Path(model_path).expanduser()
+    cwd_path = cwd or Path.cwd()
+    repo_root_path = repo_root or _repo_root()
+
+    candidates: list[Path] = []
+    if raw_path.is_absolute():
+        candidates.append(raw_path)
+    else:
+        candidates.append(cwd_path / raw_path)
+        repo_candidate = repo_root_path / raw_path
+        if repo_candidate not in candidates:
+            candidates.append(repo_candidate)
+
+    for candidate in candidates:
+        if candidate.is_file():
+            resolved = candidate.resolve()
+            return str(resolved), str(resolved)
+
+    if raw_path.is_absolute() or raw_path.parent != Path("."):
+        attempted = ", ".join(str(path.resolve()) for path in candidates)
+        raise FileNotFoundError(
+            f"YOLO model file not found for --model-path={model_path!r}. Looked in: {attempted}"
+        )
+
+    return (
+        model_path,
+        f"{model_path} (no local file in cwd/repo-root, delegating to ultralytics)",
+    )
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]

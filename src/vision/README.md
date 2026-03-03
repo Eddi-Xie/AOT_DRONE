@@ -56,4 +56,5 @@ python -m src.vision.main --source webcam:0 --mode pattern --pattern sweep
 ## Notes
 - Detect mode fails fast with a clear error if `ultralytics` is missing.
 - Pattern mode does not require `ultralytics`.
+- For slower laptops, increase `--detect-every-n` (for example `2` or `3`) to reduce detector load.
 - VIS UDP payload semantics stay strict: if state is not `Tracking`, `loc_x/loc_y/bound_w/bound_h/confidence` are sent as exact `0.0`.
