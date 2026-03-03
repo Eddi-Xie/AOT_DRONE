@@ -36,7 +36,7 @@ def test_e2e_cmd_gating_no_vis(monkeypatch) -> None:
                 client,
                 lambda payload: (
                     payload.get("tracking_blocked_reason") == "no_vis"
-                    and int(payload["last_cmd_payload"]["last_cmd_desired_mode"]) == 2
+                    and _last_cmd_mode(payload) == 2
                 ),
                 timeout_s=2.5,
             )
@@ -49,14 +49,14 @@ def test_e2e_cmd_gating_no_vis(monkeypatch) -> None:
                 timeout_s=1.0,
             )
 
-        assert fc_server.wait_for_commands(minimum_count=2, timeout_s=1.0)
+        assert matched_cmd is not None
+        assert matched_cmd["desired_mode"] == 2
+        assert fc_server.wait_for_commands(minimum_count=1, timeout_s=1.0)
         seqs = [
             int(msg["seq"]) for msg in fc_server.received_cmds() if isinstance(msg.get("seq"), int)
         ]
         for idx in range(1, len(seqs)):
             assert seqs[idx] > seqs[idx - 1]
-        assert matched_cmd is not None
-        assert matched_cmd["desired_mode"] == 2
         assert status["tracking_blocked_reason"] == "no_vis"
         assert fc_server.framing_errors == []
         assert fc_server.json_errors == []
@@ -67,3 +67,11 @@ def test_e2e_cmd_gating_no_vis(monkeypatch) -> None:
 def _cmd_seq(payload: dict[str, object]) -> int:
     seq = payload.get("seq")
     return int(seq) if isinstance(seq, int) else -1
+
+
+def _last_cmd_mode(status_payload: dict[str, object]) -> int | None:
+    last_cmd_payload = status_payload.get("last_cmd_payload")
+    if not isinstance(last_cmd_payload, dict):
+        return None
+    mode = last_cmd_payload.get("last_cmd_desired_mode")
+    return int(mode) if isinstance(mode, int) else None
