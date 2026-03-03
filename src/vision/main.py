@@ -9,13 +9,17 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from .camera import CameraSource
-from .detector import Detector, DummyDetector
+from .detector import Detector
 from .frame_pusher import FramePusher
+from .opencv_tracker import TRACKER_CHOICES, OpenCvTracker
 from .patterns import PATTERN_CHOICES, PatternGenerator
 from .publisher import Publisher, create_publisher
-from .tracker import SimpleTracker
 from .types import VisMessage, VisState, clamp01
 from .udp_vis_sender import VisUdpSender
+from .vision_pipeline import TrackerLike, VisionPipeline, VisionPipelineConfig
+from .yolo_detector import YoloDetector
+
+MODE_CHOICES = ("pattern", "detect")
 
 _TRACKING_STATE_TO_CODE = {
     VisState.NO_TARGET: 1,
@@ -29,6 +33,7 @@ _TRACKING_STATE_TRACKING = 3
 @dataclass(frozen=True)
 class VisionConfig:
     source: str = "webcam:0"
+    mode: str = "detect"
     vis_hz: float = 20.0
     frame_fps: float = 10.0
     jpeg_quality: int = 80
@@ -42,8 +47,17 @@ class VisionConfig:
     no_vis_udp: bool = False
     preview: bool = False
     max_frames: int | None = None
+    model_path: str = "yolov8n.pt"
+    target_class: int = 0
+    conf_threshold: float = 0.5
+    tracker: str = "kcf"
+    infer_width: int = 640
+    infer_size: int | None = None
+    detect_every_n: int = 1
     detect_hold_n: int = 30
-    search_n: int = 0
+    search_n: int = 30
+    desired_cx: float = 0.5
+    desired_cy: float = 0.5
     no_output: bool = False
     output: str | None = None
 
@@ -71,6 +85,12 @@ class FramePushSink(Protocol):
 def parse_args(argv: Sequence[str] | None = None) -> VisionConfig:
     parser = argparse.ArgumentParser(description="Local vision runner scaffold")
     parser.add_argument("--source", default="webcam:0", help="webcam:<index> or file:<path>")
+    parser.add_argument(
+        "--mode",
+        choices=MODE_CHOICES,
+        default="detect",
+        help="vision mode: synthetic pattern or YOLO+tracker detect",
+    )
     parser.add_argument(
         "--backend-http",
         default=_read_env_str("VISION_BACKEND_HTTP", "http://127.0.0.1:8000"),
@@ -116,10 +136,47 @@ def parse_args(argv: Sequence[str] | None = None) -> VisionConfig:
         default="none",
         help="synthetic VIS pattern mode for local validation",
     )
-    parser.add_argument("--no-frame-push", action="store_true", help="disable HTTP frame push")
-    parser.add_argument("--no-vis-udp", action="store_true", help="disable VIS UDP send")
-    parser.add_argument("--preview", action="store_true", help="show local preview window")
-    parser.add_argument("--max-frames", type=int, default=None, help="stop after N frames")
+    parser.add_argument(
+        "--model-path",
+        default="yolov8n.pt",
+        help="YOLO model path used in detect mode",
+    )
+    parser.add_argument(
+        "--target-class",
+        type=int,
+        default=0,
+        help="COCO class id to keep (default 0=person)",
+    )
+    parser.add_argument(
+        "--conf-threshold",
+        type=float,
+        default=0.5,
+        help="minimum detector confidence in [0,1]",
+    )
+    parser.add_argument(
+        "--tracker",
+        choices=TRACKER_CHOICES,
+        default="kcf",
+        help="tracking backend for detect mode",
+    )
+    parser.add_argument(
+        "--infer-width",
+        type=int,
+        default=640,
+        help="YOLO inference width while preserving aspect ratio",
+    )
+    parser.add_argument(
+        "--infer-size",
+        type=int,
+        default=None,
+        help="optional square inference size overriding --infer-width",
+    )
+    parser.add_argument(
+        "--detect-every-n",
+        type=int,
+        default=1,
+        help="run detector every N frames",
+    )
     parser.add_argument(
         "--detect-hold-n",
         type=int,
@@ -129,9 +186,25 @@ def parse_args(argv: Sequence[str] | None = None) -> VisionConfig:
     parser.add_argument(
         "--search-n",
         type=int,
-        default=0,
-        help="frames to stay in Searching after losing detections in Tracking",
+        default=30,
+        help="frames to stay in Searching before NoTarget",
     )
+    parser.add_argument(
+        "--desired-cx",
+        type=float,
+        default=0.5,
+        help="desired normalized X point used for best-box selection",
+    )
+    parser.add_argument(
+        "--desired-cy",
+        type=float,
+        default=0.5,
+        help="desired normalized Y point used for best-box selection",
+    )
+    parser.add_argument("--no-frame-push", action="store_true", help="disable HTTP frame push")
+    parser.add_argument("--no-vis-udp", action="store_true", help="disable VIS UDP send")
+    parser.add_argument("--preview", action="store_true", help="show local preview window")
+    parser.add_argument("--max-frames", type=int, default=None, help="stop after N frames")
     parser.add_argument("--no-output", action="store_true", help="disable stdout VIS output")
     parser.add_argument(
         "--output",
@@ -150,13 +223,28 @@ def parse_args(argv: Sequence[str] | None = None) -> VisionConfig:
         raise ValueError("--vis-udp-port must be in [1, 65535]")
     if args.max_frames is not None and args.max_frames <= 0:
         raise ValueError("--max-frames must be > 0")
+    if args.target_class < 0:
+        raise ValueError("--target-class must be >= 0")
+    if not (0.0 <= args.conf_threshold <= 1.0):
+        raise ValueError("--conf-threshold must be in [0, 1]")
+    if args.infer_width <= 0:
+        raise ValueError("--infer-width must be > 0")
+    if args.infer_size is not None and args.infer_size <= 0:
+        raise ValueError("--infer-size must be > 0 when provided")
+    if args.detect_every_n <= 0:
+        raise ValueError("--detect-every-n must be >= 1")
     if args.detect_hold_n < 0:
         raise ValueError("--detect-hold-n must be >= 0")
     if args.search_n < 0:
         raise ValueError("--search-n must be >= 0")
+    if not (0.0 <= args.desired_cx <= 1.0):
+        raise ValueError("--desired-cx must be in [0, 1]")
+    if not (0.0 <= args.desired_cy <= 1.0):
+        raise ValueError("--desired-cy must be in [0, 1]")
 
     return VisionConfig(
         source=args.source,
+        mode=args.mode,
         backend_http=args.backend_http,
         backend_frame_endpoint=args.backend_frame_endpoint,
         vis_udp_host=args.vis_udp_host,
@@ -165,13 +253,22 @@ def parse_args(argv: Sequence[str] | None = None) -> VisionConfig:
         frame_fps=args.frame_fps,
         jpeg_quality=args.jpeg_quality,
         pattern=args.pattern,
+        model_path=args.model_path,
+        target_class=args.target_class,
+        conf_threshold=args.conf_threshold,
+        tracker=args.tracker,
+        infer_width=args.infer_width,
+        infer_size=args.infer_size,
+        detect_every_n=args.detect_every_n,
+        detect_hold_n=args.detect_hold_n,
+        search_n=args.search_n,
+        desired_cx=args.desired_cx,
+        desired_cy=args.desired_cy,
         no_frame_push=args.no_frame_push,
         no_vis_udp=args.no_vis_udp,
         backend_video_max_jpeg_bytes=_read_env_int("BACKEND_VIDEO_MAX_JPEG_BYTES", 200_000),
         preview=args.preview,
         max_frames=args.max_frames,
-        detect_hold_n=args.detect_hold_n,
-        search_n=args.search_n,
         no_output=args.no_output,
         output=args.output,
     )
@@ -180,18 +277,14 @@ def parse_args(argv: Sequence[str] | None = None) -> VisionConfig:
 def run_loop(
     config: VisionConfig,
     detector: Detector | None = None,
-    tracker: SimpleTracker | None = None,
+    tracker: TrackerLike | None = None,
+    vision_pipeline: VisionPipeline | None = None,
     publisher: Publisher | None = None,
     frame_source: FrameSource | None = None,
     clock: Callable[[], float] | None = None,
     vis_sender: VisSender | None = None,
     frame_pusher: FramePushSink | None = None,
 ) -> int:
-    detector_impl = detector or DummyDetector()
-    tracker_impl = tracker or SimpleTracker(
-        detect_hold_n=config.detect_hold_n,
-        search_n=config.search_n,
-    )
     publisher_impl = publisher or create_publisher(
         no_output=config.no_output,
         output_spec=config.output,
@@ -199,7 +292,28 @@ def run_loop(
     source = frame_source or CameraSource.open(config.source)
     now_fn = clock or time.monotonic
 
-    pattern_generator = PatternGenerator(config.pattern) if config.pattern != "none" else None
+    pattern_generator = PatternGenerator(config.pattern) if config.mode == "pattern" else None
+    detect_pipeline = vision_pipeline if config.mode == "detect" else None
+    if config.mode == "detect" and detect_pipeline is None:
+        detector_impl = detector or YoloDetector(
+            model_path=config.model_path,
+            target_class=config.target_class,
+            conf_threshold=config.conf_threshold,
+            infer_width=config.infer_width,
+            infer_size=config.infer_size,
+        )
+        tracker_impl = tracker or OpenCvTracker(config.tracker)
+        detect_pipeline = VisionPipeline(
+            detector=detector_impl,
+            tracker=tracker_impl,
+            config=VisionPipelineConfig(
+                detect_hold_n=config.detect_hold_n,
+                search_n=config.search_n,
+                detect_every_n=config.detect_every_n,
+                desired_cx=config.desired_cx,
+                desired_cy=config.desired_cy,
+            ),
+        )
 
     vis_sender_impl: VisSender | None
     if config.no_vis_udp:
@@ -247,13 +361,12 @@ def run_loop(
 
             frame_id += 1
             img_h, img_w = frame.shape[:2]
-            if pattern_generator is None:
-                detections = list(detector_impl.detect(frame, frame_id=frame_id))
-                tracker_result = tracker_impl.update(
-                    detections=detections, img_w=img_w, img_h=img_h
-                )
-            else:
+            if detect_pipeline is not None:
+                tracker_result = detect_pipeline.process_frame(frame=frame, frame_id=frame_id)
+            elif pattern_generator is not None:
                 tracker_result = pattern_generator.update(frame_id=frame_id)
+            else:
+                raise RuntimeError("invalid vision mode configuration")
 
             now_s = now_fn()
             if frame_pusher_impl is not None and (
