@@ -175,6 +175,36 @@ Socket integration note:
 - Keep at least one CI environment that can bind local UDP sockets so ingest loop tests execute without being skipped.
 - In CI we enforce this with `REQUIRE_UDP_BIND_TESTS=1` for pytest.
 
+PR11 end-to-end test flow:
+- CI-safe E2E checks (VIS/TEL ingest paths, WS, status, CMD gating with fake FC) are part of the default suite:
+
+```bash
+pytest -q
+```
+
+- Exact PR11-focused commands:
+
+```bash
+python -m ruff check tests/integration
+pytest -q tests/integration
+RUN_FULL_E2E=1 pytest -q -m integration
+```
+
+- Convenience wrapper:
+
+```bash
+./scripts/dev/e2e.sh
+RUN_FULL_E2E=1 ./scripts/dev/e2e.sh
+```
+
+- Optional subprocess smoke (backend + vision replay, and optionally `fc_app`) is marked `integration`:
+
+```bash
+pytest -q -m integration
+RUN_FULL_E2E=1 pytest -q -m integration
+RUN_FULL_E2E=1 RUN_FULL_E2E_WITH_FC=1 pytest -q -m integration
+```
+
 ---
 
 ## Development Workflow

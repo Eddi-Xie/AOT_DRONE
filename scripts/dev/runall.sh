@@ -15,6 +15,7 @@ fi
 
 python -m ruff check src tests
 python -m pre_commit run --all-files
+pytest -q tests/integration
 pytest -q
 cmake -S . -B build
 cmake --build build -j
