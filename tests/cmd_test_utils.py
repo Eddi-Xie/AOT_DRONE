@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import struct
 import threading
@@ -14,6 +15,8 @@ def require_tcp_bind_or_skip() -> None:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
             probe.bind(("127.0.0.1", 0))
     except OSError as exc:
+        if os.environ.get("REQUIRE_TCP_BIND_TESTS", "").strip().lower() in {"1", "true", "yes"}:
+            raise AssertionError(f"TCP socket bind required but unavailable: {exc}") from exc
         pytest.skip(f"TCP socket bind unavailable in test environment: {exc}")
 
 
