@@ -47,6 +47,7 @@ def test_ws_connect_sends_initial_link_status(monkeypatch) -> None:
         "frames_rx_ok",
         "frames_rx_bad",
         "vis_fresh_s",
+        "tel_fresh_s",
         "cmd_timeout_s",
         "cmd_hz",
         "tel_hz",
@@ -83,6 +84,7 @@ def test_ws_connect_sends_initial_link_status(monkeypatch) -> None:
     assert data["frames_rx_bad"] == 0
 
     assert isinstance(data["vis_fresh_s"], float)
+    assert isinstance(data["tel_fresh_s"], float)
     assert isinstance(data["cmd_timeout_s"], float)
     assert isinstance(data["cmd_hz"], float)
     assert isinstance(data["tel_hz"], float)

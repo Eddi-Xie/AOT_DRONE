@@ -23,6 +23,7 @@ class BackendBroadcaster:
         vis_hz: float = 20.0,
         link_hz: float = 2.0,
         vis_fresh_s: float = 0.25,
+        tel_fresh_s: float = 0.5,
         cmd_timeout_s: float = 0.5,
         cmd_hz_nominal: float = 50.0,
         tel_hz_nominal: float = 50.0,
@@ -39,6 +40,8 @@ class BackendBroadcaster:
             raise ValueError("link_hz must be > 0")
         if vis_fresh_s < 0:
             raise ValueError("vis_fresh_s must be >= 0")
+        if tel_fresh_s <= 0:
+            raise ValueError("tel_fresh_s must be > 0")
         if cmd_timeout_s <= 0:
             raise ValueError("cmd_timeout_s must be > 0")
         if warning_min_interval_s < 0:
@@ -50,6 +53,7 @@ class BackendBroadcaster:
         self.vis_hz = vis_hz
         self.link_hz = link_hz
         self.vis_fresh_s = vis_fresh_s
+        self.tel_fresh_s = tel_fresh_s
         self.cmd_timeout_s = cmd_timeout_s
         self.cmd_hz_nominal = cmd_hz_nominal
         self.tel_hz_nominal = tel_hz_nominal
@@ -88,6 +92,7 @@ class BackendBroadcaster:
         now_s = float(now_monotonic_s) if now_monotonic_s is not None else self._clock()
         payload = self._state.get_link_status(
             vis_fresh_s=self.vis_fresh_s,
+            tel_fresh_s=self.tel_fresh_s,
             cmd_timeout_s=self.cmd_timeout_s,
             cmd_hz=self.cmd_hz_nominal,
             tel_hz=self.tel_hz_nominal,

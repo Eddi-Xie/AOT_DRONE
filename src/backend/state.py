@@ -364,6 +364,7 @@ class SharedState:
     def get_link_status(
         self,
         vis_fresh_s: float,
+        tel_fresh_s: float,
         cmd_timeout_s: float,
         cmd_hz: float,
         tel_hz: float,
@@ -400,6 +401,7 @@ class SharedState:
                 "tel_rx_ok": self.tel_rx_ok,
                 "tel_rx_bad": self.tel_rx_bad,
                 "vis_fresh_s": float(vis_fresh_s),
+                "tel_fresh_s": float(tel_fresh_s),
                 "cmd_timeout_s": float(cmd_timeout_s),
                 "cmd_hz": float(cmd_hz),
                 "tel_hz": float(tel_hz),

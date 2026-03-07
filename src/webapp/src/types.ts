@@ -46,6 +46,7 @@ export interface LinkStatus {
   tel_rx_ok: number;
   tel_rx_bad: number;
   vis_fresh_s: number;
+  tel_fresh_s: number;
   cmd_timeout_s: number;
   cmd_hz: number;
   tel_hz: number;
@@ -222,6 +223,7 @@ export function asLinkStatus(value: unknown): LinkStatus | null {
     tel_rx_ok: readNumber(value.tel_rx_ok) ?? 0,
     tel_rx_bad: readNumber(value.tel_rx_bad) ?? 0,
     vis_fresh_s: readNumber(value.vis_fresh_s) ?? 0,
+    tel_fresh_s: readNumber(value.tel_fresh_s) ?? 0,
     cmd_timeout_s: readNumber(value.cmd_timeout_s) ?? 0,
     cmd_hz: readNumber(value.cmd_hz) ?? 0,
     tel_hz: readNumber(value.tel_hz) ?? 0,
