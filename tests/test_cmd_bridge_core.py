@@ -2,7 +2,7 @@ import json
 import struct
 
 from src.backend.cmd_bridge import CmdBridge
-from src.backend.state import SharedState
+from src.backend.state import CMD_SEQ_MAX, SharedState
 
 
 class _FakeSocket:
@@ -67,3 +67,12 @@ def test_last_cmd_payload_debug_snapshot_updates() -> None:
     assert status["last_cmd_had_tracking"] is True
     assert isinstance(status["last_cmd_bytes"], int)
     assert status["last_cmd_bytes"] > 0
+
+
+def test_reserve_cmd_seq_wraps_after_int32_maximum() -> None:
+    state = SharedState()
+    state.cmd_next_seq = CMD_SEQ_MAX - 1
+
+    assert state.reserve_cmd_seq() == CMD_SEQ_MAX - 1
+    assert state.reserve_cmd_seq() == CMD_SEQ_MAX
+    assert state.reserve_cmd_seq() == 0

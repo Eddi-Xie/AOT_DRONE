@@ -175,3 +175,44 @@ int main() {
 """
     run_result = _compile_and_run_cpp(tmp_path, source)
     assert run_result.returncode == 0, run_result.stderr + run_result.stdout
+
+
+def test_entering_manual_mode_clears_stale_tracking_axes(tmp_path: Path) -> None:
+    source = r"""
+#include "FlightController.h"
+
+int main() {
+    fc::FlightController controller;
+    controller.setArm(true);
+    controller.setControlMode(fc::ControlMode::Tracking);
+
+    fc::TrackingMessage msg{};
+    msg.state = fc::TrackingState::Tracking;
+    msg.target_x = 1.0;
+    msg.target_y = 0.0;
+    msg.bound_w = 0.1;
+    msg.bound_h = 0.05;
+    msg.confidence = 1.0;
+    msg.timestamp_s = 1.0;
+    controller.updateTracking(msg);
+    controller.updateTimeStep(0.02);
+
+    const fc::BetaFlightCommand tracking_cmd = controller.getCurrentCommand();
+    if (tracking_cmd.pitch == fc::rc::DRONE_MID || tracking_cmd.yaw == fc::rc::DRONE_MID) {
+        return 1;
+    }
+
+    controller.setControlMode(fc::ControlMode::Manual);
+    const fc::BetaFlightCommand manual_cmd = controller.updateTimeStep(0.02);
+    if (manual_cmd.pitch != fc::rc::DRONE_MID) {
+        return 2;
+    }
+    if (manual_cmd.yaw != fc::rc::DRONE_MID) {
+        return 3;
+    }
+
+    return 0;
+}
+"""
+    run_result = _compile_and_run_cpp(tmp_path, source)
+    assert run_result.returncode == 0, run_result.stderr + run_result.stdout
