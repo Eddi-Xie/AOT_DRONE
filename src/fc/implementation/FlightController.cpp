@@ -74,7 +74,7 @@ void FlightController::setControlMode(ControlMode mode) {
 }
 
 void FlightController::setHoverThrottle(std::uint16_t hoverThrottle) {
-    hoverThrottle_ = std::clamp(hoverThrottle, rc::DRONE_MIN, rc::DRONE_MAX);
+    hoverThrottle_ = std::clamp(hoverThrottle, rc::DRONE_MIN, kAltHoldMaxThrottle);
 }
 
 void FlightController::updateTracking(const TrackingMessage& msg) {
@@ -235,7 +235,7 @@ void FlightController::runLandSafelyMode(double deltaTime_s) {
 }
 
 void FlightController::runManualMode() {
-    telemetryData_.tracking_state = lastTrackingMsg_.state;
+    telemetryData_.tracking_state = TrackingState::Searching;
 }
 
 void FlightController::runTrackingMode() {
@@ -429,10 +429,10 @@ void FlightController::commandAltHoldDelta(double deltaNorm) {
     double cmd = hover;
 
     if (deltaNorm < 0.0) {
-        const double downRange = hover - static_cast<double>(rc::DRONE_MIN);
+        const double downRange = std::max(0.0, hover - static_cast<double>(rc::DRONE_MIN));
         cmd = hover + deltaNorm * downRange;
     } else {
-        const double upRange = static_cast<double>(kAltHoldMaxThrottle) - hover;
+        const double upRange = std::max(0.0, static_cast<double>(kAltHoldMaxThrottle) - hover);
         cmd = hover + deltaNorm * upRange;
     }
 
