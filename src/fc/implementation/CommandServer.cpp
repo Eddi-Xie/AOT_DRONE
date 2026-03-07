@@ -26,77 +26,132 @@ bool should_log(double now_s_value, double& last_log_s, double interval_s) {
     }
     return false;
 }
+
+void shutdown_and_close_fd(int& fd) {
+    if (fd < 0) {
+        return;
+    }
+    ::shutdown(fd, SHUT_RDWR);
+    ::close(fd);
+    fd = -1;
+}
 } // namespace
 
 namespace fc {
 
 CommandServer::CommandServer(int port) : port_(port) {}
 
+CommandServer::~CommandServer() {
+    stop();
+}
+
 bool CommandServer::start() {
-    listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
-    if (listen_fd_ < 0) {
+    if (running_.load()) {
+        return true;
+    }
+
+    const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
         return false;
     }
 
     int yes = 1;
-    ::setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port = htons(static_cast<uint16_t>(port_));
 
-    if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
-        ::close(listen_fd_);
-        listen_fd_ = -1;
+    if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) < 0) {
+        ::close(fd);
         return false;
     }
 
-    if (::listen(listen_fd_, 1) < 0) {
-        ::close(listen_fd_);
-        listen_fd_ = -1;
+    if (::listen(fd, 1) < 0) {
+        ::close(fd);
         return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(socket_mutex_);
+        listen_fd_ = fd;
     }
 
     running_.store(true);
-    std::thread(&CommandServer::run_loop, this).detach();
+    worker_ = std::thread(&CommandServer::run_loop, this);
     return true;
 }
 
 void CommandServer::stop() {
     running_.store(false);
-    if (client_fd_ >= 0) {
-        ::close(client_fd_);
+    {
+        std::lock_guard<std::mutex> lock(socket_mutex_);
+        shutdown_and_close_fd(client_fd_);
+        shutdown_and_close_fd(listen_fd_);
     }
-    if (listen_fd_ >= 0) {
-        ::close(listen_fd_);
+
+    if (worker_.joinable()) {
+        worker_.join();
     }
-    client_fd_ = -1;
-    listen_fd_ = -1;
 }
 
 void CommandServer::run_loop() {
     double last_link_lost_log_s = -1.0;
     while (running_.load()) {
         std::cout << "[FC] Waiting for TCP command client on :" << port_ << "\n";
-        client_fd_ = ::accept(listen_fd_, nullptr, nullptr);
-        if (client_fd_ < 0) {
+        int listen_fd_snapshot = -1;
+        {
+            std::lock_guard<std::mutex> lock(socket_mutex_);
+            listen_fd_snapshot = listen_fd_;
+        }
+
+        if (listen_fd_snapshot < 0) {
+            break;
+        }
+
+        const int accepted_fd = ::accept(listen_fd_snapshot, nullptr, nullptr);
+        if (accepted_fd < 0) {
             if (running_.load()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
             continue;
         }
 
+        {
+            std::lock_guard<std::mutex> lock(socket_mutex_);
+            if (!running_.load()) {
+                ::close(accepted_fd);
+                break;
+            }
+            shutdown_and_close_fd(client_fd_);
+            client_fd_ = accepted_fd;
+        }
+
         std::cout << "[FC] Backend connected\n";
         while (running_.load()) {
+            int client_fd_snapshot = -1;
+            {
+                std::lock_guard<std::mutex> lock(socket_mutex_);
+                client_fd_snapshot = client_fd_;
+            }
+            if (client_fd_snapshot < 0) {
+                break;
+            }
+
             std::string json;
-            if (!read_frame(client_fd_, json, static_cast<uint32_t>(proto::TCP_MAX_FRAME_BYTES))) {
+            if (!read_frame(client_fd_snapshot, json,
+                            static_cast<uint32_t>(proto::TCP_MAX_FRAME_BYTES))) {
                 const double t_s = now_s();
                 if (should_log(t_s, last_link_lost_log_s, 1.0)) {
                     std::cout << "[FC] Command link lost / invalid frame\n";
                 }
-                ::close(client_fd_);
-                client_fd_ = -1;
+                {
+                    std::lock_guard<std::mutex> lock(socket_mutex_);
+                    if (client_fd_ == client_fd_snapshot) {
+                        shutdown_and_close_fd(client_fd_);
+                    }
+                }
                 break;
             }
 
@@ -118,6 +173,10 @@ void CommandServer::run_loop() {
                       << "\n";
         }
     }
+
+    std::lock_guard<std::mutex> lock(socket_mutex_);
+    shutdown_and_close_fd(client_fd_);
+    shutdown_and_close_fd(listen_fd_);
 }
 
 std::string CommandServer::last_cmd_json() const {

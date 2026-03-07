@@ -36,5 +36,5 @@ dist/
 .DS_Store
 Thumbs.db
 
-# Local YOLO weights
-yolov8n.pt
+# Vision models
+/yolov8n.pt

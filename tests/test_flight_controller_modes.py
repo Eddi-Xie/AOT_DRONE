@@ -116,3 +116,62 @@ int main() {
 """
     run_result = _compile_and_run_cpp(tmp_path, source)
     assert run_result.returncode == 0, run_result.stderr + run_result.stdout
+
+
+def test_manual_mode_reports_searching_state_not_tracking(tmp_path: Path) -> None:
+    source = r"""
+#include "FlightController.h"
+
+int main() {
+    fc::FlightController controller;
+    controller.setControlMode(fc::ControlMode::Manual);
+
+    fc::TrackingMessage msg{};
+    msg.state = fc::TrackingState::Tracking;
+    msg.target_x = 0.1;
+    msg.target_y = 0.0;
+    msg.bound_w = 0.2;
+    msg.bound_h = 0.3;
+    msg.confidence = 0.9;
+    msg.timestamp_s = 1.0;
+    controller.updateTracking(msg);
+
+    controller.updateTimeStep(0.02);
+    const fc::TelemetryData& telemetry = controller.getTelemetryData();
+    if (telemetry.tracking_state != fc::TrackingState::Searching) {
+        return 1;
+    }
+    return 0;
+}
+"""
+    run_result = _compile_and_run_cpp(tmp_path, source)
+    assert run_result.returncode == 0, run_result.stderr + run_result.stdout
+
+
+def test_alt_hold_positive_delta_never_reduces_throttle_at_high_hover_setting(
+    tmp_path: Path,
+) -> None:
+    source = r"""
+#include "FlightController.h"
+
+int main() {
+    fc::FlightController controller;
+    controller.setHoverThrottle(1800);
+
+    controller.commandAltHoldDelta(0.0);
+    const std::uint16_t neutral = controller.getCurrentCommand().throttle;
+
+    controller.commandAltHoldDelta(1.0);
+    const std::uint16_t climb = controller.getCurrentCommand().throttle;
+
+    if (climb < neutral) {
+        return 1;
+    }
+    if (neutral > 1500 || climb > 1500) {
+        return 2;
+    }
+    return 0;
+}
+"""
+    run_result = _compile_and_run_cpp(tmp_path, source)
+    assert run_result.returncode == 0, run_result.stderr + run_result.stdout
