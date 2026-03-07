@@ -5,6 +5,14 @@ from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any
 
+CMD_SEQ_MAX = 2_147_483_647
+_CMD_SEQ_MOD = CMD_SEQ_MAX + 1
+
+
+def _initial_cmd_seq() -> int:
+    return int(time.monotonic() * 1000.0) % _CMD_SEQ_MOD
+
+
 _TEL_DROP_REASON_ATTRS = {
     "oversize": "tel_drop_reason_oversize",
     "json": "tel_drop_reason_json",
@@ -63,7 +71,7 @@ class SharedState:
     cmd_hz_est: float = 0.0
     tracking_blocked_reason: str | None = None
 
-    cmd_next_seq: int = field(default_factory=lambda: int(time.monotonic() * 1000.0))
+    cmd_next_seq: int = field(default_factory=_initial_cmd_seq)
     last_cmd_seq: int | None = None
     last_cmd_desired_mode: int | None = None
     last_cmd_had_tracking: bool = False
@@ -109,7 +117,7 @@ class SharedState:
             self.cmd_last_sent_monotonic_s = None
             self.cmd_hz_est = 0.0
             self.tracking_blocked_reason = None
-            self.cmd_next_seq = int(time.monotonic() * 1000.0)
+            self.cmd_next_seq = _initial_cmd_seq()
             self.last_cmd_seq = None
             self.last_cmd_desired_mode = None
             self.last_cmd_had_tracking = False
@@ -217,16 +225,19 @@ class SharedState:
 
     def reserve_cmd_seq(self, minimum: int | None = None) -> int:
         with self.lock:
-            if minimum is not None and self.cmd_next_seq < minimum:
-                self.cmd_next_seq = int(minimum)
+            if minimum is not None:
+                clamped_minimum = max(0, min(int(minimum), CMD_SEQ_MAX))
+                if self.cmd_next_seq < clamped_minimum:
+                    self.cmd_next_seq = clamped_minimum
             seq = self.cmd_next_seq
-            self.cmd_next_seq += 1
+            self.cmd_next_seq = 0 if seq >= CMD_SEQ_MAX else seq + 1
             return seq
 
     def ensure_cmd_seq_minimum(self, minimum: int) -> None:
         with self.lock:
-            if self.cmd_next_seq < minimum:
-                self.cmd_next_seq = int(minimum)
+            clamped_minimum = max(0, min(int(minimum), CMD_SEQ_MAX))
+            if self.cmd_next_seq < clamped_minimum:
+                self.cmd_next_seq = clamped_minimum
 
     def record_last_cmd_payload(self, payload: dict[str, Any], payload_bytes: int) -> None:
         with self.lock:
