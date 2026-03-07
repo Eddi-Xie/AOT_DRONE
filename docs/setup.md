@@ -34,7 +34,7 @@ Install Python tooling (recommended inside a virtual environment or conda enviro
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip==24.3.1
+python -m pip install --upgrade pip==26.0.1
 python -m pip install -r requirements-dev.txt
 ```
 
@@ -78,6 +78,92 @@ The repository includes reproducible helper scripts:
 ```
 
 `runall.sh` installs pinned dependencies, checks that `ruff` is available, runs lint/tests, and verifies the C++ build.
+
+---
+
+## Quick Demo (recommended)
+
+Start/inspect/stop the full laptop demo stack with one-command scripts:
+
+```bash
+./scripts/dev/demo_up.sh
+./scripts/dev/demo_status.sh
+./scripts/dev/demo_down.sh
+```
+
+`demo_up.sh` starts backend + `fc_app` + vision + webapp, writes logs in `logs/`, and records PIDs in `.run/demo_pids`.
+You can skip components for partial runs with `DEMO_SKIP_BACKEND`, `DEMO_SKIP_FC`, `DEMO_SKIP_VISION`, `DEMO_SKIP_WEBAPP` (set each to `0` or `1`).
+
+Vision defaults in demo mode use:
+- `DEMO_VISION_ARGS="--source webcam:0 --mode detect --model-path yolov8n.pt --target-class 0 --preview --conf-threshold 0.25 --detect-hold-n 5 --infer-size 640"`
+
+Model expectation:
+- `yolov8n.pt` must exist at repo root by default.
+- Override the model/vision flags with `DEMO_VISION_ARGS`:
+
+```bash
+DEMO_VISION_ARGS="--source webcam:0 --mode detect --model-path /abs/path/custom.pt --target-class 0 --preview --conf-threshold 0.3 --detect-hold-n 5 --infer-size 640" ./scripts/dev/demo_up.sh
+```
+
+Partial-stack examples:
+
+```bash
+DEMO_SKIP_FC=1 ./scripts/dev/demo_up.sh
+DEMO_SKIP_VISION=1 DEMO_SKIP_WEBAPP=1 ./scripts/dev/demo_up.sh
+```
+
+---
+
+## Manual run (debug)
+
+Use the manual 4-terminal flow when debugging individual components.
+
+Runtime environment:
+
+```bash
+source .venv/bin/activate
+export BACKEND_TEL_HOST=127.0.0.1
+export BACKEND_TEL_PORT=9001
+export BACKEND_VIS_HOST=127.0.0.1
+export BACKEND_VIS_PORT=9003
+export BACKEND_FC_HOST=127.0.0.1
+export BACKEND_FC_PORT=9002
+export BACKEND_CMD_BRIDGE_ENABLED=1
+export BACKEND_TEL_INGEST_ENABLED=1
+export BACKEND_VIS_INGEST_ENABLED=1
+export BACKEND_VIDEO_ENABLED=1
+export VISION_BACKEND_HTTP=http://127.0.0.1:8000
+export VISION_VIS_UDP_HOST=127.0.0.1
+export VISION_VIS_UDP_PORT=9003
+export VITE_BACKEND_HTTP_URL=http://127.0.0.1:8000
+export VITE_BACKEND_WS_URL=ws://127.0.0.1:8000/ws
+export VITE_VIDEO_URL=/video
+export VITE_OVERLAY_SOURCE=VIS
+```
+
+Terminal 1 (backend):
+
+```bash
+python -m uvicorn src.backend.app:app --host 127.0.0.1 --port 8000
+```
+
+Terminal 2 (`fc_app`):
+
+```bash
+./build/src/fc/fc_app
+```
+
+Terminal 3 (vision detect mode):
+
+```bash
+python -m src.vision.main --source webcam:0 --mode detect --model-path yolov8n.pt --target-class 0 --preview --conf-threshold 0.25 --detect-hold-n 5 --infer-size 640
+```
+
+Terminal 4 (webapp):
+
+```bash
+npm --prefix src/webapp run dev
+```
 
 ---
 
