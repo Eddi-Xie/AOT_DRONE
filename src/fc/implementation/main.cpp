@@ -45,6 +45,25 @@ bool to_control_mode(int raw_mode, fc::ControlMode& out_mode) {
     }
 }
 
+bool to_tracking_state(int raw_state, fc::TrackingState& out_state) {
+    switch (raw_state) {
+    case 1:
+        out_state = fc::TrackingState::NoTarget;
+        return true;
+    case 2:
+        out_state = fc::TrackingState::TargetDetected;
+        return true;
+    case 3:
+        out_state = fc::TrackingState::Tracking;
+        return true;
+    case 4:
+        out_state = fc::TrackingState::Searching;
+        return true;
+    default:
+        return false;
+    }
+}
+
 double clamp_target_coord(double value) {
     if (!std::isfinite(value)) {
         return 0.0;
@@ -118,6 +137,27 @@ void apply_setpoint_overrides(const fc::CommandFrame& cmd, fc::FlightController&
     }
 
     controller.setManualSetpoints(command);
+}
+
+void apply_tracking_update(const fc::CommandFrame& cmd, fc::FlightController& controller) {
+    if (!cmd.tracking.has_tracking) {
+        return;
+    }
+
+    fc::TrackingState tracking_state = fc::TrackingState::Searching;
+    if (!to_tracking_state(cmd.tracking.tracking_state, tracking_state)) {
+        return;
+    }
+
+    fc::TrackingMessage tracking_message;
+    tracking_message.state = tracking_state;
+    tracking_message.target_x = cmd.tracking.loc_x;
+    tracking_message.target_y = cmd.tracking.loc_y;
+    tracking_message.bound_w = cmd.tracking.bound_w;
+    tracking_message.bound_h = cmd.tracking.bound_h;
+    tracking_message.confidence = cmd.tracking.confidence;
+    tracking_message.timestamp_s = cmd.tracking.vis_timestamp_s;
+    controller.updateTracking(tracking_message);
 }
 
 std::string build_tel_json(uint64_t seq, const fc::TelemetryData& telemetry,
@@ -209,6 +249,7 @@ int main() {
                 flight_controller.setArm(cmd.arm);
             }
             apply_setpoint_overrides(cmd, flight_controller);
+            apply_tracking_update(cmd, flight_controller);
 
             std::cout << "[FC] Applied CMD seq=" << cmd.seq << " desired_mode=" << cmd.desired_mode
                       << "\n";

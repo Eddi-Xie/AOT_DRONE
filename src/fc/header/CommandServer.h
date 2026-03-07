@@ -4,12 +4,14 @@
 #include <atomic>
 #include <mutex>
 #include <string>
+#include <thread>
 
 namespace fc {
 
 class CommandServer {
   public:
     explicit CommandServer(int port);
+    ~CommandServer();
     bool start();
     void stop();
 
@@ -26,6 +28,8 @@ class CommandServer {
     int port_;
     int listen_fd_ = -1;
     int client_fd_ = -1;
+    std::thread worker_;
+    mutable std::mutex socket_mutex_;
 
     std::atomic<bool> running_{false};
     mutable std::mutex cmd_mutex_;

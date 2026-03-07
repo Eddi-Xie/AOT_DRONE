@@ -18,6 +18,18 @@ struct CommandSetpoints {
     double throttle = 0.0;
 };
 
+struct CommandTracking {
+    bool has_tracking = false;
+    int tracking_state = 4;
+    double loc_x = 0.0;
+    double loc_y = 0.0;
+    double bound_w = 0.0;
+    double bound_h = 0.0;
+    double confidence = 0.0;
+    int vis_seq = 0;
+    double vis_timestamp_s = 0.0;
+};
+
 struct CommandFrame {
     int seq = 0;
     double timestamp_s = 0.0;
@@ -27,6 +39,7 @@ struct CommandFrame {
     bool arm = false;
 
     CommandSetpoints setpoints{};
+    CommandTracking tracking{};
     std::string raw_json;
 };
 
