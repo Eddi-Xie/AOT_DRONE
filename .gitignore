@@ -33,3 +33,6 @@ dist/
 # OS
 .DS_Store
 Thumbs.db
+
+# Vision models
+/yolov8n.pt
