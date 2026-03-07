@@ -67,6 +67,16 @@ void FlightController::setControlMode(ControlMode mode) {
     controlMode_ = mode;
     telemetryData_.control_mode = mode;
 
+    if (mode == ControlMode::Manual) {
+        // Prevent stale tracking outputs from carrying into manual mode when no setpoints are
+        // provided.
+        currentCommand_.roll = rc::DRONE_MID;
+        currentCommand_.pitch = rc::DRONE_MID;
+        currentCommand_.yaw = rc::DRONE_MID;
+        currentCommand_.throttle = is_armed(currentCommand_) ? hoverThrottle_ : rc::DRONE_MIN;
+        setAltHold(false);
+    }
+
     landSafelyInitialized_ = false;
     landTimer_s_ = 0.0;
     takeoffInitialized_ = false;
