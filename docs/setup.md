@@ -12,7 +12,7 @@ This document describes how to set up the development environment and verify the
 - CMake ≥ 3.16
 - C/C++ compiler (clang or gcc)
 - Python ≥ 3.10
-- Node.js (optional, for web UI later)
+- Node.js (required for web UI build/tests)
 
 ---
 
@@ -34,7 +34,7 @@ Install Python tooling (recommended inside a virtual environment or conda enviro
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip==26.0.1
+python -m pip install --upgrade pip==24.3.1
 python -m pip install -r requirements-dev.txt
 ```
 
@@ -254,12 +254,13 @@ GitHub Actions runs the following on every push and pull request:
 - Pre-commit checks (formatting and linting)
 - C/C++ build using CMake
 - Python test discovery using pytest
+- Webapp unit tests and production build (`npm run test`, `npm run build`)
 
 If CI fails, the failure should be reproducible locally using the commands above.
 
 Socket integration note:
-- Keep at least one CI environment that can bind local UDP sockets so ingest loop tests execute without being skipped.
-- In CI we enforce this with `REQUIRE_UDP_BIND_TESTS=1` for pytest.
+- Keep at least one CI environment that can bind local UDP/TCP sockets so ingest and bridge loop tests execute without being skipped.
+- In CI we enforce this with `REQUIRE_UDP_BIND_TESTS=1` and `REQUIRE_TCP_BIND_TESTS=1` for pytest.
 
 PR11 end-to-end test flow:
 - CI-safe E2E checks (VIS/TEL ingest paths, WS, status, CMD gating with fake FC) are part of the default suite:
@@ -310,11 +311,11 @@ Direct commits to `main` are discouraged.
 ## Current Project State
 
 At this stage, the repository contains:
-- Project scaffolding and structure
+- Implemented FC app command/telemetry loop and protocol handling
+- Implemented backend ingest, command bridge, status APIs, WS, and video endpoints
+- Implemented vision runner modes and backend publishing integration
+- Implemented webapp live status/video overlay UI with tests
 - Tooling and CI configuration
-- Documentation defining architecture and message contracts
-
-Functional implementations (backend logic, flight control integration, vision integration) will be added in subsequent pull requests.
 
 Refer to:
 - `docs/architecture.md` for system structure

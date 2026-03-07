@@ -68,6 +68,13 @@ npm run build
 npm run preview
 ```
 
+## Test
+
+```bash
+npm run test
+npm run test:watch
+```
+
 Typecheck note:
 - Build uses `tsc --noEmit` before Vite bundling. This keeps type coverage for app code while avoiding generated TS outputs in the webapp root.
 
@@ -106,10 +113,8 @@ npm run dev
 - Video panel appears with a 16:9 stage and overlay label text (`source`, `state`, `confidence`).
 - Bounding box overlay follows incoming normalized VIS/TEL data and remains aligned while resizing the browser.
 
-## Backend follow-up (PR-B5)
+## Backend video endpoint
 
-Current UI video path expects a backend endpoint at `/video`; if absent the panel cleanly falls back to placeholder mode.
-
-Suggested backend follow-up:
-- Add a minimal MJPEG endpoint (`multipart/x-mixed-replace`) at `/video` from vision frames, or
-- Add a placeholder `/video` endpoint that returns `200` with a clear capability message.
+Backend exposes:
+- `GET /video` for MJPEG stream consumption in the video panel
+- `POST /api/frame` for JPEG frame ingest from vision/runtime tools

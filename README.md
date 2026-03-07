@@ -24,7 +24,7 @@ Monorepo for the drone control stack:
 Install dependencies before running lint/tests:
 
 ```bash
-python -m pip install --upgrade pip==26.0.1
+python -m pip install --upgrade pip==24.3.1
 python -m pip install -r requirements-dev.txt
 python -m pip install -r src/backend/requirements.txt
 python -m pip install -r src/vision/requirements.txt
@@ -41,7 +41,7 @@ Run all commands from the repository root unless noted.
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip==26.0.1
+python -m pip install --upgrade pip==24.3.1
 python -m pip install -r requirements-dev.txt
 python -m pip install -r src/backend/requirements.txt
 python -m pip install -r src/vision/requirements.txt
@@ -152,6 +152,8 @@ curl -s http://127.0.0.1:8000/api/status | head -c 400 && echo
 ```bash
 pytest -q
 pytest -q tests/integration
+npm --prefix src/webapp run test
+npm --prefix src/webapp run build
 ./scripts/dev/e2e.sh
 RUN_FULL_E2E=1 ./scripts/dev/e2e.sh
 ./scripts/dev/runall.sh
@@ -194,10 +196,14 @@ Throttling defaults (configurable with env vars):
 - `VIS_UPDATE`: capped at `BACKEND_WS_VIS_HZ` (default `20 Hz`)
 - `LINK_STATUS`: heartbeat at `BACKEND_WS_LINK_HZ` (default `2 Hz`)
 
-## Current legacy message formats (to be standardized)
+## Legacy Message Formats (Historical)
 
 Telemetry:
 `TEL <timestamp_s> <control_mode> <tracking_state> <distFront_m> <distBack_m> <distBottom_m> <target_x> <target_y> <bound_w> <bound_h> <confidence>`
 
 Vision:
 `<state> <loc_x> <loc_y> <bound_w> <bound_h> <confidence> <timestamp_s>`
+
+## License
+
+This repository is licensed under the Apache License 2.0. See [LICENSE](LICENSE).
