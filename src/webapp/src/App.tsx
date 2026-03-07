@@ -590,10 +590,10 @@ export default function App(): JSX.Element {
       });
     }
 
-    if (held("tel-stale", projectedTelAgeS !== null && projectedTelAgeS >= DEFAULT_TEL_FRESH_S)) {
+    if (held("tel-stale", projectedTelAgeS !== null && projectedTelAgeS >= telFreshThresholdS)) {
       alerts.push({
         id: "tel-stale",
-        detail: `Telemetry stale (>= ${formatSeconds(DEFAULT_TEL_FRESH_S, 2)}).`,
+        detail: `Telemetry stale (>= ${formatSeconds(telFreshThresholdS, 2)}).`,
         severity: "warn",
       });
     }
@@ -619,6 +619,7 @@ export default function App(): JSX.Element {
     state.linkStatus?.fc_connected,
     state.wsConnected,
     trackingBlockedReason,
+    telFreshThresholdS,
     visFreshThresholdS,
   ]);
   const stableDerivedAlerts = useMemo(() => {

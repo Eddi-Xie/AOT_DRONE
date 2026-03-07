@@ -38,6 +38,7 @@ def test_ws_link_status_heartbeat_emits_multiple_events(monkeypatch) -> None:
     assert "tel_age_s" in data
     assert "tel_rx_ok" in data
     assert "tel_rx_bad" in data
+    assert "tel_fresh_s" in data
     assert "video_enabled" in data
     assert "video_clients" in data
     assert "video_fps_est" in data

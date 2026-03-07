@@ -5,6 +5,7 @@ import os
 import threading
 import time
 from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -35,7 +36,6 @@ from .video_hub import (
 from .vis_ingest import VisUdpIngestor
 from .ws_manager import WsManager
 
-app = FastAPI()
 state = SharedState()
 
 _tel_stop_event = threading.Event()
@@ -52,6 +52,7 @@ _video_hub: VideoFrameHub | None = None
 _synthetic_jpeg_generator: SyntheticJpegGenerator | None = None
 
 _runtime_vis_fresh_s = 0.25
+_runtime_tel_fresh_s = 0.5
 _runtime_cmd_hz = 50.0
 _runtime_tel_hz = 50.0
 _runtime_video_enabled = True
@@ -67,10 +68,10 @@ class IntentRequest(BaseModel):
     setpoints: dict[str, float] | None = None
 
 
-@app.on_event("startup")
-def startup() -> None:
+def _startup() -> None:
     global _broadcaster, _cmd_bridge, _tel_ingestor, _tel_thread, _vis_ingestor, _vis_thread
     global _ws_manager, _runtime_cmd_hz, _runtime_tel_hz, _runtime_vis_fresh_s
+    global _runtime_tel_fresh_s
     global _runtime_video_enabled, _runtime_video_fps, _runtime_video_max_jpeg_bytes
     global _runtime_video_frame_fresh_s, _runtime_video_validate_decode
     global _video_hub, _synthetic_jpeg_generator
@@ -79,6 +80,7 @@ def startup() -> None:
     _runtime_cmd_hz = _read_env_float("BACKEND_CMD_HZ", 50.0)
     _runtime_tel_hz = _read_env_float("BACKEND_TEL_HZ_NOMINAL", 50.0)
     _runtime_vis_fresh_s = _read_env_float("BACKEND_VIS_FRESH_S", 0.25)
+    _runtime_tel_fresh_s = max(0.001, _read_env_float("BACKEND_TEL_FRESH_S", 0.5))
     _runtime_video_enabled = _read_env_bool("BACKEND_VIDEO_ENABLED", True)
     _runtime_video_fps = max(0.5, _read_env_float("BACKEND_VIDEO_FPS", 10.0))
     _runtime_video_max_jpeg_bytes = max(1, _read_env_int("BACKEND_VIDEO_MAX_JPEG_BYTES", 200_000))
@@ -95,6 +97,7 @@ def startup() -> None:
         vis_hz=_read_env_float("BACKEND_WS_VIS_HZ", 20.0),
         link_hz=_read_env_float("BACKEND_WS_LINK_HZ", 2.0),
         vis_fresh_s=_runtime_vis_fresh_s,
+        tel_fresh_s=_runtime_tel_fresh_s,
         cmd_timeout_s=CMD_TIMEOUT_S,
         cmd_hz_nominal=_runtime_cmd_hz,
         tel_hz_nominal=_runtime_tel_hz,
@@ -158,8 +161,7 @@ def startup() -> None:
     )
 
 
-@app.on_event("shutdown")
-def shutdown() -> None:
+def _shutdown() -> None:
     global _broadcaster, _cmd_bridge, _tel_ingestor, _tel_thread, _vis_ingestor, _vis_thread
     global _ws_manager, _video_hub, _synthetic_jpeg_generator
 
@@ -199,6 +201,18 @@ def shutdown() -> None:
     app.state.video_config = None
 
 
+@asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    _startup()
+    try:
+        yield
+    finally:
+        _shutdown()
+
+
+app = FastAPI(lifespan=_lifespan)
+
+
 @app.get("/health")
 def health() -> dict[str, bool]:
     return {"ok": True}
@@ -229,6 +243,7 @@ def api_status() -> dict[str, Any]:
     now_s = time.monotonic()
     status = state.get_link_status(
         vis_fresh_s=_runtime_vis_fresh_s,
+        tel_fresh_s=_runtime_tel_fresh_s,
         cmd_timeout_s=CMD_TIMEOUT_S,
         cmd_hz=_runtime_cmd_hz,
         tel_hz=_runtime_tel_hz,
@@ -403,6 +418,7 @@ def _render_synthetic_frame(now_monotonic_s: float) -> bytes:
 
     link_status = state.get_link_status(
         vis_fresh_s=_runtime_vis_fresh_s,
+        tel_fresh_s=_runtime_tel_fresh_s,
         cmd_timeout_s=CMD_TIMEOUT_S,
         cmd_hz=_runtime_cmd_hz,
         tel_hz=_runtime_tel_hz,
