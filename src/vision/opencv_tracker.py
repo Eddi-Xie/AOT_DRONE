@@ -47,8 +47,13 @@ class OpenCvTracker:
         if self._factory is None:
             return False
 
+        cv_bbox = _to_cv_bbox(bbox=bbox, frame=frame)
+        if cv_bbox is None:
+            self._tracker = None
+            return False
+
         tracker = self._factory()
-        ok = bool(tracker.init(frame, _to_cv_bbox(bbox)))
+        ok = bool(tracker.init(frame, cv_bbox))
         if not ok:
             self._tracker = None
             return False
@@ -76,8 +81,33 @@ class OpenCvTracker:
         self._tracker = None
 
 
-def _to_cv_bbox(bbox: PixelBBox) -> tuple[float, float, float, float]:
-    return (float(bbox.x), float(bbox.y), float(bbox.w), float(bbox.h))
+def _to_cv_bbox(bbox: PixelBBox, frame: Any) -> tuple[int, int, int, int] | None:
+    if not hasattr(frame, "shape"):
+        return None
+
+    shape = frame.shape
+    if not isinstance(shape, tuple) or len(shape) < 2:
+        return None
+    img_h = int(shape[0])
+    img_w = int(shape[1])
+    if img_w <= 0 or img_h <= 0:
+        return None
+
+    x = int(round(float(bbox.x)))
+    y = int(round(float(bbox.y)))
+    w = int(round(float(bbox.w)))
+    h = int(round(float(bbox.h)))
+    if w <= 0 or h <= 0:
+        return None
+
+    x = max(0, min(x, img_w - 1))
+    y = max(0, min(y, img_h - 1))
+    w = min(w, img_w - x)
+    h = min(h, img_h - y)
+    if w <= 0 or h <= 0:
+        return None
+
+    return (x, y, w, h)
 
 
 def _resolve_tracker_factory(cv2_module: Any, tracker_type: str) -> Any | None:

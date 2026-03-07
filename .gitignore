@@ -12,6 +12,8 @@ cmake-build-*/
 
 # Logs
 *.log
+logs/
+.run/
 
 # Python
 __pycache__/
