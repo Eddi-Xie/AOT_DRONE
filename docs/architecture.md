@@ -13,6 +13,17 @@ The architecture is designed to:
 - allow each component to restart independently
 - make inter-process communication explicit and well-defined
 
+> **Current state (2026-05):** The C++ FC process (`fc_app`) computes RC channel
+> commands every 20 ms but does not yet emit them to the physical Betaflight
+> flight controller — there is no MSP/UART/serial output path implemented in
+> `src/fc/`. Sprint 0 of `docs/development_plan.md` introduces an `IRcSink`
+> abstraction (`NullSink`, `RecordingSink`, `FakeBetaflightSink`) and a USB
+> `MspRcSink` for bench validation. UART pivot, real-FC HIL acceptance, and
+> first autonomous flight are scheduled for Sprint 1. Until those land,
+> autonomous flight is not possible and `fc_app` should be treated as a
+> simulator — never connect a propellered airframe to it expecting hardware
+> behaviour.
+
 ---
 
 ## High-Level Overview

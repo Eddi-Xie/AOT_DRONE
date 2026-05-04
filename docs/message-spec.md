@@ -81,6 +81,7 @@ All messages are UTF-8 JSON in v1.
 Timestamp guidance:
 - Prefer a monotonic clock source where available.
 - timestamp_s is for ordering/diagnostics; receivers must rely on seq for drop/gap detection.
+- timestamp_s is monotonic *to the sender*. Each process has its own clock origin, so consumers MUST NOT compare `timestamp_s` values across senders. To compute "freshness from receiver's POV", record the local monotonic time of receipt and use that for age computations.
 
 ---
 
@@ -101,6 +102,25 @@ Required fields:
 - bound_h: float
 - confidence: float
 
+Optional fields (added incrementally; consumers MUST tolerate absence):
+- cmd_age_s: float — seconds since the FC last accepted a CMD frame from
+  backend, observed by the FC. Used by the UI to surface command-link
+  health. (Emitted by `fc_app` since the failsafe-hysteresis change in
+  `docs/development_plan.md` S0.4.)
+- failsafe_state: int — 0=Healthy, 1=StaleSoft, 2=StaleHard. Reflects the
+  FC's two-stage stale-CMD failsafe state machine. (S0.4.)
+- failsafe_age_s: float — time spent in the current `failsafe_state`. (S0.4.)
+- arm_gate_status: int — 0=Denied, 1=Requested, 2=Granted. Reflects the FC's
+  three-condition arm-authority gate (CMD `arm:true` + tracking-state-OK +
+  RC arm-switch held). See ADR-003. (S0.14 / Sprint 1.)
+- last_loop_dt_ms: float — observed dt of the previous FC control-loop
+  iteration; used to detect loop stalls. (Sprint 1 P1.6.)
+- msp_tx_ratio: float in [0,1] — fraction of MSP writes acknowledged in the
+  last second. (Sprint 1 P1.1.)
+- last_intent_id: string — UUID of the most recently-applied operator
+  intent, echoed back from the originating CMD. Allows webapp → CMD → TEL
+  end-to-end tracing. (S0.20 / Sprint 1 P5.5.)
+
 Semantics:
 - target_x, target_y are normalized image coordinates in [-1, 1]
   - (0, 0) is center, +x is right, +y is up
@@ -108,6 +128,8 @@ Semantics:
 - confidence in [0, 1]
 - If tracking_state != Tracking, target_x/target_y/bound_w/bound_h/confidence should still be present.
   - Use 0.0 for target_x/target_y/bound_w/bound_h and 0.0 confidence when no target is available.
+- All numeric fields MUST be finite (no NaN, no ±Inf). Senders MUST coerce
+  to 0.0 if a finite value is unavailable.
 
 Example:
 {
@@ -123,7 +145,10 @@ Example:
   "target_y": -0.05,
   "bound_w": 0.20,
   "bound_h": 0.30,
-  "confidence": 0.86
+  "confidence": 0.86,
+  "cmd_age_s": 0.018,
+  "failsafe_state": 0,
+  "failsafe_age_s": 0.0
 }
 
 ---
