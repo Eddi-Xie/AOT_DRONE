@@ -42,3 +42,61 @@ def test_frame_ingest_rejects_oversize_content_length_before_body_read(monkeypat
 
     assert response.status_code == 400
     assert "content-length exceeds max size" in response.text
+
+
+def test_frame_ingest_rejects_malformed_content_length(monkeypatch) -> None:
+    """Non-numeric Content-Length must 400 with the malformed-header message
+    and must not consume the body."""
+    _configure_no_network_runtime(monkeypatch)
+    monkeypatch.setenv("BACKEND_VIDEO_ENABLED", "1")
+    monkeypatch.setenv("BACKEND_VIDEO_MAX_JPEG_BYTES", "1024")
+
+    async def _fail_if_body_read(
+        self,
+    ) -> bytes:  # pragma: no cover - enforced by assertion behavior
+        raise AssertionError("request body must not be read for malformed content-length")
+
+    monkeypatch.setattr(Request, "body", _fail_if_body_read, raising=True)
+
+    payload = b"\xff\xd8\xff\xd9"
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/frame",
+            content=payload,
+            headers={
+                "content-type": "image/jpeg",
+                "content-length": "not-a-number",
+            },
+        )
+
+    assert response.status_code == 400
+    assert "invalid content-length header" in response.text
+
+
+def test_frame_ingest_rejects_negative_content_length(monkeypatch) -> None:
+    """Negative Content-Length must 400 with the malformed-header message
+    and must not consume the body."""
+    _configure_no_network_runtime(monkeypatch)
+    monkeypatch.setenv("BACKEND_VIDEO_ENABLED", "1")
+    monkeypatch.setenv("BACKEND_VIDEO_MAX_JPEG_BYTES", "1024")
+
+    async def _fail_if_body_read(
+        self,
+    ) -> bytes:  # pragma: no cover - enforced by assertion behavior
+        raise AssertionError("request body must not be read for negative content-length")
+
+    monkeypatch.setattr(Request, "body", _fail_if_body_read, raising=True)
+
+    payload = b"\xff\xd8\xff\xd9"
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/frame",
+            content=payload,
+            headers={
+                "content-type": "image/jpeg",
+                "content-length": "-5",
+            },
+        )
+
+    assert response.status_code == 400
+    assert "invalid content-length header" in response.text
