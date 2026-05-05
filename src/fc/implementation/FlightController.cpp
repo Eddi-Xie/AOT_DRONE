@@ -1,5 +1,8 @@
 #include "FlightController.h"
 
+#include "Clamp.h"
+#include "RcMath.h"
+
 #include <algorithm>
 #include <cmath>
 
@@ -9,24 +12,13 @@ constexpr double kDisarmTimeS = 5.0;
 constexpr double kLandRampRateUsPerS = 50.0;
 constexpr std::uint16_t kMinLandThrottle = fc::rc::DRONE_MIN + 30;
 constexpr double kMaxControlDtS = 0.2;
-constexpr double kMaxYawRateDps = 180.0;
 constexpr double kPitchRangeUs = 300.0;
 constexpr double kYawRangeUs = 300.0;
 constexpr std::uint16_t kAltHoldMaxThrottle = 1500;
 
-double clamp_target_coord(double value) {
-    if (!std::isfinite(value)) {
-        return 0.0;
-    }
-    return std::clamp(value, -1.0, 1.0);
-}
-
-double clamp_unit(double value) {
-    if (!std::isfinite(value)) {
-        return 0.0;
-    }
-    return std::clamp(value, 0.0, 1.0);
-}
+using fc::clamp_target_coord;
+using fc::clamp_unit;
+using fc::rc::kMaxYawRateDps;
 
 bool is_armed(const fc::BetaFlightCommand& cmd) {
     const std::uint16_t threshold =
