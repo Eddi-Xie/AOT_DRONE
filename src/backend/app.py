@@ -23,6 +23,7 @@ from .protocol_constants import (
     UDP_MAX_VIS_BYTES,
     UDP_TEL_PORT,
     UDP_VIS_PORT,
+    VIDEO_MAX_JPEG_BYTES_DEFAULT,
 )
 from .state import SharedState
 from .tel_ingest import TelUdpIngestor
@@ -57,7 +58,7 @@ _runtime_cmd_hz = 50.0
 _runtime_tel_hz = 50.0
 _runtime_video_enabled = True
 _runtime_video_fps = 10.0
-_runtime_video_max_jpeg_bytes = 200_000
+_runtime_video_max_jpeg_bytes = VIDEO_MAX_JPEG_BYTES_DEFAULT
 _runtime_video_frame_fresh_s = 1.0
 _runtime_video_validate_decode = False
 
@@ -83,7 +84,9 @@ def _startup() -> None:
     _runtime_tel_fresh_s = max(0.001, _read_env_float("BACKEND_TEL_FRESH_S", 0.5))
     _runtime_video_enabled = _read_env_bool("BACKEND_VIDEO_ENABLED", True)
     _runtime_video_fps = max(0.5, _read_env_float("BACKEND_VIDEO_FPS", 10.0))
-    _runtime_video_max_jpeg_bytes = max(1, _read_env_int("BACKEND_VIDEO_MAX_JPEG_BYTES", 200_000))
+    _runtime_video_max_jpeg_bytes = max(
+        1, _read_env_int("BACKEND_VIDEO_MAX_JPEG_BYTES", VIDEO_MAX_JPEG_BYTES_DEFAULT)
+    )
     _runtime_video_frame_fresh_s = max(0.0, _read_env_float("BACKEND_VIDEO_FRAME_FRESH_S", 1.0))
     _runtime_video_validate_decode = _read_env_bool("BACKEND_VIDEO_VALIDATE_DECODE", False)
     _video_hub = VideoFrameHub()
