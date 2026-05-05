@@ -1,7 +1,7 @@
 # AOT Drone — Development Plan
 **v2 — drafted 2026-05-04** (Eddi solo through May 11, then summer with John). Living document; updated across multiple Claude sessions.
 
-> Repo root: `/Users/eddixie/Documents/VSCode/UBC/AOT_DRONE_V2/AOT_DRONE`
+> All file paths in this document are repo-relative. Run commands from your local checkout of the `AOT_DRONE` repository.
 
 ---
 
@@ -196,7 +196,8 @@ Priority within Sprint 0: P0 → P1 → P2. P0 must be green by May 11; P1 shoul
 - [ ] **`runHoverSearchState` redundant write** (`FlightController.cpp:182-184` then `commandYawRate`): drop dead store.
 - [ ] **`is_armed` arithmetic** (`FlightController.cpp:31-37`, C-13): document why midpoint check; ensure call sites only use `setArm` to write the value (current `setArm` is correct — just add comment).
 - [ ] **Pin LC_NUMERIC=C at startup** + `oss.imbue(std::locale::classic())` (A-07) so float formatting is locale-safe.
-- [ ] **Acceptance:** `pytest -q tests/fc/` green; new tests cover seq wrap, malformed desired_mode, stale-CMD-transition, locale safety.
+- [ ] **Manual-mode throttle preset reads stale `aux1`** (Copilot review on `chore/bugfixes` for commit `1394c65`): `setControlMode(Manual)` reads `is_armed(currentCommand_)` to choose `hoverThrottle_` vs `DRONE_MIN`, but `main.cpp` applies `desired_mode` BEFORE `cmd.arm`, so a single CMD that combines `Manual + arm:true` enters Manual seeing the *old* aux1 (disarmed) and leaves throttle at `DRONE_MIN` until a later setpoint update. Fix as part of this section's main.cpp ordering rework: apply `cmd.has_arm`/`setArm` BEFORE `setControlMode(desired_mode)` so the Manual transition sees the up-to-date aux1; or move the throttle preset out of `setControlMode` and recompute after the post-update `is_armed` guard at the end of `updateTimeStep`. Either fix needs HIL replay (`Manual+arm:true` scenario) before merge per ADR-004.
+- [ ] **Acceptance:** `pytest -q tests/fc/` green; new tests cover seq wrap, malformed desired_mode, stale-CMD-transition, locale safety, and the `Manual+arm:true` ordering above.
 
 ### S0.5 — Vision software fixes (no hardware needed)
 
@@ -685,6 +686,37 @@ If Eddi can move past these without John, they go in Sprint 0:
 - Sprint 1 reframed around John's tools (3D printer, soldering, harnessing) and first-flight progression.
 - ADR-001 through ADR-005 to be authored in S0.1.
 - Next session: start S0.1 (ADRs + doc updates) and S0.2 (dead-code purge) in parallel; expect them done in <2 hours.
+
+### 2026-05-04 — Eddi + Claude — S0.1 Copilot review follow-up
+
+- Addressed all 9 Copilot review comments on `chore/sprint0-docs` (PR open):
+  - Replaced absolute developer path in `development_plan.md` with a
+    repo-relative note.
+  - Renamed `FakeSink` → `FakeBetaflightSink` in the `hil.md` topology
+    diagram for naming consistency.
+  - Tagged the four planned helper scripts (`latency_probe.py`,
+    `read_flight_log.py`, `record_mission.py`, `replay_mission.py`) with
+    explicit "(planned, not yet committed)" markers and the phase that
+    introduces each, plus a clarifying note at the top of the workflow
+    section.
+  - Removed the implementation-history claim on the `cmd_age_s` field
+    description (the field is already emitted by `fc_app`, not added in
+    S0.4).
+  - Tightened the "all numeric fields MUST be finite" rule into per-field
+    semantics: 0.0 substitution is only permitted for the tracking fields;
+    other required numerics MUST be dropped + logged on non-finite to
+    avoid masking sensor or logic faults.
+  - Fixed "debug under hand" → "debug by hand" typo in ADR-001.
+- Plan addendum: added an explicit task in S0.4 documenting the
+  Copilot-flagged ordering bug from `chore/bugfixes` (Manual-mode throttle
+  preset reads stale `aux1` when `Manual + arm:true` arrive in the same
+  CMD). Deferred from `chore/bugfixes` per ADR-004 (HIL bench required
+  before fixing in-flight-behaviour code).
+- Pre-commit clean (no code touched).
+- Next: switch to `chore/bugfixes` and add the missing test coverage for
+  `state.py` seq clamping (negative + over-max minimums) and `/api/frame`
+  Content-Length edge cases (malformed + negative). Hold S0.2 until both
+  PRs merge to `dev`.
 
 ### 2026-05-04 — Eddi + Claude — S0.1 complete on `chore/sprint0-docs`
 

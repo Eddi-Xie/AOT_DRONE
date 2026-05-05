@@ -36,9 +36,10 @@ The HIL bench gives us:
 - **Real-FC validation with motors detached.** `MspRcSink` drives a real
   Betaflight FC over USB or UART; Betaflight Configurator's "Receiver" tab
   visualises the channels. ESCs may be powered (no thrust without motors).
-- **Latency probe.** `scripts/dev/latency_probe.py` injects a synthetic
-  bbox into the vision UDP stream and measures the time until the
-  corresponding RC channel is written. Target: vision → MSP <100 ms p95.
+- **Latency probe.** `scripts/dev/latency_probe.py` (planned, Sprint 1
+  P1.7 — not yet committed) will inject a synthetic bbox into the vision
+  UDP stream and measure the time until the corresponding RC channel is
+  written. Target: vision → MSP <100 ms p95.
 
 ---
 
@@ -60,12 +61,12 @@ The HIL bench gives us:
                                               |        |
                                   IRcSink     |        | UDP TEL (echo)
                                               v        v
-                                  +-----------+--+   +-+----------------+
-                                  | NullSink     |   | Backend WS clients|
-                                  | RecordingSink|   +-------------------+
-                                  | FakeSink     |
-                                  | MspRcSink    |
-                                  +--------------+
+                                  +--------------------+   +-+----------------+
+                                  | NullSink           |   | Backend WS clients|
+                                  | RecordingSink      |   +-------------------+
+                                  | FakeBetaflightSink |
+                                  | MspRcSink          |
+                                  +--------------------+
                                           |
                                           | (MspRcSink only)
                                           v
@@ -100,7 +101,8 @@ Used for:
 
 - Capturing baseline runs ("what does the controller do on this scenario today?")
 - Diffing against a baseline after a controller change
-- Feeding into post-bench analysis (`scripts/dev/read_flight_log.py` or a notebook)
+- Feeding into post-bench analysis (`scripts/dev/read_flight_log.py` —
+  planned, Sprint 1 P5.3, not yet committed — or a notebook)
 
 ### 3.3 FakeBetaflightSink
 
@@ -137,31 +139,37 @@ Mission scenarios are short (≤ 60 s) recorded sequences of (VIS UDP, CMD
 TCP) inputs that exercise a slice of behaviour: "person walks across frame",
 "vision drops mid-flight", "operator pushes Takeoff with no arm switch", etc.
 
-Workflow:
+> **Note:** the `record_mission.py` and `replay_mission.py` helpers below
+> are planned scaffolding (Sprint 0 task S0.7 of `docs/development_plan.md`)
+> and have not been committed yet. The workflow in this section describes
+> the *target* behaviour. Until the scripts land, capture is manual (run
+> the stack, observe `logs/hil/sink_*.csv`); replay is not yet possible.
+
+Workflow (target):
 
 ```bash
 # 1. Capture (live webcam + manual operator)
 FC_RC_SINK=recording ./build/src/fc/fc_app &
 python -m src.vision.main --source webcam:0 --mode detect ... &
 python -m uvicorn src.backend.app:app --host 127.0.0.1 --port 8000 &
-python scripts/dev/record_mission.py --output missions/walk_across.jsonl
+python scripts/dev/record_mission.py --output missions/walk_across.jsonl   # planned (S0.7)
 
 # 2. Inspect the recorded VIS+CMD trace + the RecordingSink CSV
 ls logs/hil/sink_*.csv
 head missions/walk_across.jsonl
 ```
 
-Replay (no live vision needed):
+Replay (target — no live vision needed):
 
 ```bash
 FC_RC_SINK=recording ./build/src/fc/fc_app &
-python scripts/dev/replay_mission.py missions/walk_across.jsonl
+python scripts/dev/replay_mission.py missions/walk_across.jsonl   # planned (S0.7)
 
 # Then diff the new RecordingSink CSV against a baseline
 diff logs/hil/sink_<new>.csv missions/walk_across.baseline.csv
 ```
 
-Expected gates:
+Expected gates (apply once the scripts above are committed):
 
 - For unchanged controller code: byte-for-byte match against baseline.
 - For tuning changes: bounded delta (e.g. `|throttle_delta| < 20 µs` per
@@ -183,7 +191,8 @@ A change touches in-flight behaviour if it modifies any of:
 Such changes MUST include:
 
 - A unit test (where applicable).
-- A replay against at least one recorded mission scenario (`replay_mission.py`).
+- A replay against at least one recorded mission scenario
+  (`replay_mission.py` — once committed; until then, manual bench observation).
 - For changes that produce a different intended channel output, a new
   baseline CSV stored in `missions/`.
 

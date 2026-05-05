@@ -32,7 +32,7 @@ These decisions are now formalised below as ADR-001 / ADR-002.
 
 - Status: Accepted
 - Date: 2026-02-03 (formalised 2026-05-04)
-- Context: We need an inter-process message format that we can debug under hand
+- Context: We need an inter-process message format that we can debug by hand
   with `tcpdump`/`nc`/`socat`, that is easy to evolve, and that is supported on
   every language in the stack (C++ FC, Python backend + vision, TS webapp).
 - Decision: Use UTF-8 JSON for all wire formats (UDP TEL, UDP VIS, TCP CMD,
