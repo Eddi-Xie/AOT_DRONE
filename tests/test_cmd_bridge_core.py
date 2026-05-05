@@ -2,7 +2,7 @@ import json
 import struct
 
 from src.backend.cmd_bridge import CmdBridge
-from src.backend.state import SharedState
+from src.backend.state import CMD_SEQ_MAX, SharedState
 
 
 class _FakeSocket:
@@ -67,3 +67,57 @@ def test_last_cmd_payload_debug_snapshot_updates() -> None:
     assert status["last_cmd_had_tracking"] is True
     assert isinstance(status["last_cmd_bytes"], int)
     assert status["last_cmd_bytes"] > 0
+
+
+def test_reserve_cmd_seq_wraps_after_int32_maximum() -> None:
+    state = SharedState()
+    state.cmd_next_seq = CMD_SEQ_MAX - 1
+
+    assert state.reserve_cmd_seq() == CMD_SEQ_MAX - 1
+    assert state.reserve_cmd_seq() == CMD_SEQ_MAX
+    assert state.reserve_cmd_seq() == 0
+
+
+def test_reserve_cmd_seq_clamps_negative_minimum_to_zero() -> None:
+    """Negative minimum must not pull the sequence backwards or raise."""
+    state = SharedState()
+    state.cmd_next_seq = 100
+
+    # Negative minimum clamps to 0; cmd_next_seq is already > 0, so no bump.
+    assert state.reserve_cmd_seq(minimum=-1) == 100
+    assert state.reserve_cmd_seq(minimum=-1_000_000) == 101
+
+    # If cmd_next_seq sits low and minimum is negative, we still don't go
+    # backwards — we just advance normally from current.
+    state.cmd_next_seq = 5
+    assert state.reserve_cmd_seq(minimum=-50) == 5
+    assert state.cmd_next_seq == 6
+
+
+def test_reserve_cmd_seq_clamps_over_max_minimum_to_max() -> None:
+    """Minimum above CMD_SEQ_MAX must clamp to CMD_SEQ_MAX, then wrap."""
+    state = SharedState()
+    state.cmd_next_seq = 0
+
+    seq = state.reserve_cmd_seq(minimum=CMD_SEQ_MAX + 1000)
+    assert seq == CMD_SEQ_MAX
+    # The very next reserve wraps to 0.
+    assert state.reserve_cmd_seq() == 0
+
+
+def test_ensure_cmd_seq_minimum_clamps_out_of_range_inputs() -> None:
+    """Out-of-range minimums must not crash or move cmd_next_seq backwards."""
+    state = SharedState()
+    state.cmd_next_seq = 50
+
+    # Negative minimum clamps to 0; cmd_next_seq stays at 50 (> 0).
+    state.ensure_cmd_seq_minimum(-100)
+    assert state.cmd_next_seq == 50
+
+    # Over-max minimum clamps to CMD_SEQ_MAX and bumps cmd_next_seq up.
+    state.ensure_cmd_seq_minimum(CMD_SEQ_MAX + 1000)
+    assert state.cmd_next_seq == CMD_SEQ_MAX
+
+    # Subsequent reserve returns CMD_SEQ_MAX, then wraps.
+    assert state.reserve_cmd_seq() == CMD_SEQ_MAX
+    assert state.reserve_cmd_seq() == 0
