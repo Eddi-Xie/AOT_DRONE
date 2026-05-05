@@ -690,6 +690,60 @@ If Eddi can move past these without John, they go in Sprint 0:
 - ADR-001 through ADR-005 to be authored in S0.1.
 - Next session: start S0.1 (ADRs + doc updates) and S0.2 (dead-code purge) in parallel; expect them done in <2 hours.
 
+### 2026-05-04 — Eddi + Claude — S0.2 dead-code purge + constants centralization
+
+- Branch: `chore/sprint0-cleanup` off `dev` (post-merge of `chore/sprint0-docs`
+  and `chore/bugfixes`).
+- Dead-code deletions (audit A-14, F18, Backend #20):
+  - `src/backend/udp_ingest.py` — earlier version of the UDP ingest path,
+    no imports anywhere.
+  - `src/backend/tcp_client.py` — earlier version of the TCP cmd bridge,
+    no imports anywhere.
+  - `src/fc/implementation/placeholder.cpp` — never referenced from
+    `src/fc/CMakeLists.txt`, scaffolding artefact.
+- `dist/` untracking (audit B17): no work needed — already covered by
+  `src/webapp/.gitignore` and the root `.gitignore`. The audit finding
+  was stale.
+- FC constants centralization (audit M-06, A-06):
+  - New `src/fc/header/Clamp.h`: `clamp_target_coord` and `clamp_unit` as
+    inline functions in `namespace fc`. Removes the duplicated definitions
+    from `FlightController.cpp:17-29` and `main.cpp:67-79`.
+  - New `src/fc/header/RcMath.h`: `kAxisRangeUs`, `kMaxYawRateDps`, and the
+    three PWM mappers (`normalized_axis_to_pwm`, `yaw_rate_to_pwm`,
+    `throttle_to_pwm`) as inline functions in `namespace fc::rc`. Removes
+    the duplicated `kMaxYawRateDps` (was at `FlightController.cpp:12` and
+    `main.cpp:21`) and pulls the PWM mapper bodies (`main.cpp:81-116`)
+    out of the binary's anonymous namespace into a header.
+  - `FlightController.cpp` and `main.cpp` now use `using` aliases to keep
+    call sites identical. No behavioural change. Header doc references
+    audit P2.9 for the future consolidation of
+    `kPitchRangeUs / kYawRangeUs / kAxisRangeUs` into a single
+    `RcStickRangeUs` (Sprint 1 control-quality work).
+- Backend / vision constants centralization (audit F46):
+  - `VIDEO_MAX_JPEG_BYTES_DEFAULT = 200_000` added to
+    `src/backend/protocol_constants.py` with a comment explaining why both
+    sides must default to the same value.
+  - `src/backend/app.py` and `src/vision/main.py` import the constant and
+    use it as the default for their `BACKEND_VIDEO_MAX_JPEG_BYTES` env-var
+    reads. Vision now imports from `src.backend.protocol_constants` —
+    accepted as a wire-contract dependency (vision and backend must agree
+    on this size).
+- Verification:
+  - `cmake --build build -j` clean.
+  - `python -m ruff check src tests` clean.
+  - `python -m pre_commit run --all-files` clean (ruff, ruff-format,
+    clang-format, file hygiene all green).
+  - `pytest -q` of the runnable subset (66 tests covering FC modes,
+    cmd bridge core, backend API validation, schemas, etc.) all pass.
+  - The pre-existing `tests.cmd_test_utils` / `tests.ws_test_utils`
+    `ModuleNotFoundError` collection errors for 9 test files are inherited
+    from `dev` and unrelated to S0.2 — separate pytest-discovery issue
+    to fix later.
+  - Smoke: `./build/src/fc/fc_app` boots, emits TEL seq=0 mode=2
+    tracking_state=4, exits cleanly on signal.
+- Net diff: 5 files modified, 3 deleted, 2 new headers — 35 lines added,
+  133 removed. Pure cleanup; no runtime-behaviour change.
+
 ### 2026-05-04 — Eddi + Claude — second Copilot review pass
 
 - `chore/sprint0-docs` round 2 (this pass):
