@@ -100,3 +100,34 @@ def test_frame_ingest_rejects_negative_content_length(monkeypatch) -> None:
 
     assert response.status_code == 400
     assert "invalid content-length header" in response.text
+
+
+def test_frame_ingest_rejects_empty_content_length(monkeypatch) -> None:
+    """Present-but-empty Content-Length (e.g. the literal value "" or pure
+    whitespace) must 400 with the malformed-header message and must not
+    consume the body. Without this guard, the empty header silently
+    falls through to await request.body() and bypasses the early reject."""
+    _configure_no_network_runtime(monkeypatch)
+    monkeypatch.setenv("BACKEND_VIDEO_ENABLED", "1")
+    monkeypatch.setenv("BACKEND_VIDEO_MAX_JPEG_BYTES", "1024")
+
+    async def _fail_if_body_read(
+        self,
+    ) -> bytes:  # pragma: no cover - enforced by assertion behavior
+        raise AssertionError("request body must not be read for empty content-length")
+
+    monkeypatch.setattr(Request, "body", _fail_if_body_read, raising=True)
+
+    payload = b"\xff\xd8\xff\xd9"
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/frame",
+            content=payload,
+            headers={
+                "content-type": "image/jpeg",
+                "content-length": "   ",
+            },
+        )
+
+    assert response.status_code == 400
+    assert "invalid content-length header" in response.text

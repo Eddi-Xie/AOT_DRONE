@@ -277,27 +277,32 @@ async def post_frame(request: Request) -> dict[str, Any]:
     content_length_header = request.headers.get("content-length")
     if content_length_header is not None:
         content_length_text = content_length_header.strip()
-        if content_length_text:
-            try:
-                content_length = int(content_length_text)
-            except ValueError:
-                video_hub.record_bad_frame()
-                raise HTTPException(
-                    status_code=400,
-                    detail="invalid content-length header",
-                ) from None
-            if content_length < 0:
-                video_hub.record_bad_frame()
-                raise HTTPException(status_code=400, detail="invalid content-length header")
-            if content_length > _runtime_video_max_jpeg_bytes:
-                video_hub.record_bad_frame()
-                detail = (
-                    "content-length exceeds max size " f"({_runtime_video_max_jpeg_bytes} bytes)"
-                )
-                raise HTTPException(
-                    status_code=400,
-                    detail=detail,
-                )
+        if not content_length_text:
+            # Present-but-empty Content-Length must not silently fall through
+            # to await request.body(); treat as a malformed header.
+            video_hub.record_bad_frame()
+            raise HTTPException(
+                status_code=400,
+                detail="invalid content-length header",
+            )
+        try:
+            content_length = int(content_length_text)
+        except ValueError:
+            video_hub.record_bad_frame()
+            raise HTTPException(
+                status_code=400,
+                detail="invalid content-length header",
+            ) from None
+        if content_length < 0:
+            video_hub.record_bad_frame()
+            raise HTTPException(status_code=400, detail="invalid content-length header")
+        if content_length > _runtime_video_max_jpeg_bytes:
+            video_hub.record_bad_frame()
+            detail = "content-length exceeds max size " f"({_runtime_video_max_jpeg_bytes} bytes)"
+            raise HTTPException(
+                status_code=400,
+                detail=detail,
+            )
 
     payload = await request.body()
     if len(payload) == 0:
