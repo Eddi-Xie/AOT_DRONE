@@ -178,7 +178,10 @@ Semantics:
 - bound_w, bound_h are normalized in [0, 1]
 - confidence in [0, 1]
 - If tracking_state != Tracking, set loc_x/loc_y/bound_w/bound_h/confidence to 0.0.
-  - PR-B2 backend ingest accepts tiny drift (abs(value) <= 1e-6), then normalizes to 0.0.
+  - Receivers MAY accept tiny floating-point drift on the zero values
+    (abs(value) <= 1e-6) and normalise such inputs to 0.0; values outside
+    that tolerance MUST be treated as a schema violation and the message
+    dropped + logged.
 
 Example:
 {

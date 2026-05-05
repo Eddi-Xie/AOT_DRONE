@@ -197,7 +197,10 @@ Priority within Sprint 0: P0 → P1 → P2. P0 must be green by May 11; P1 shoul
 - [ ] **`is_armed` arithmetic** (`FlightController.cpp:31-37`, C-13): document why midpoint check; ensure call sites only use `setArm` to write the value (current `setArm` is correct — just add comment).
 - [ ] **Pin LC_NUMERIC=C at startup** + `oss.imbue(std::locale::classic())` (A-07) so float formatting is locale-safe.
 - [ ] **Manual-mode throttle preset reads stale `aux1`** (Copilot review on `chore/bugfixes` for commit `1394c65`): `setControlMode(Manual)` reads `is_armed(currentCommand_)` to choose `hoverThrottle_` vs `DRONE_MIN`, but `main.cpp` applies `desired_mode` BEFORE `cmd.arm`, so a single CMD that combines `Manual + arm:true` enters Manual seeing the *old* aux1 (disarmed) and leaves throttle at `DRONE_MIN` until a later setpoint update. Fix as part of this section's main.cpp ordering rework: apply `cmd.has_arm`/`setArm` BEFORE `setControlMode(desired_mode)` so the Manual transition sees the up-to-date aux1; or move the throttle preset out of `setControlMode` and recompute after the post-update `is_armed` guard at the end of `updateTimeStep`. Either fix needs HIL replay (`Manual+arm:true` scenario) before merge per ADR-004.
-- [ ] **Acceptance:** `pytest -q tests/fc/` green; new tests cover seq wrap, malformed desired_mode, stale-CMD-transition, locale safety, and the `Manual+arm:true` ordering above.
+- [ ] **Add `Manual+arm:true` integration test that drives `main.cpp`'s real CMD-application path** (Copilot review on `chore/bugfixes` for `tests/test_flight_controller_modes.py`): the existing tests call `setControlMode(Manual)` directly and therefore don't catch the ordering bug above. Add a test that constructs a `CommandFrame` with `desired_mode=Manual, arm=true` and routes it through the same parse/apply path used by the FC binary, asserting throttle becomes `hoverThrottle_` (not `DRONE_MIN`).
+- [ ] **Backend `state.py` cmd_seq APIs are not wrap-monotonicity-safe** (Copilot review on `chore/bugfixes` for `state.py:228-240`): both `reserve_cmd_seq(minimum=…)` and `ensure_cmd_seq_minimum(…)` use a linear `cmd_next_seq < clamped_minimum` check. After the counter wraps to a low value, a stale high minimum (e.g. from a `CmdBridge(seq_start=…)` restart against an FC that already saw the high seqs) will jump back into the pre-wrap range and reissue old sequence numbers. Rework alongside the FC `seq` filter modular-arithmetic change above: replace the linear comparison with signed-modular `int32_t diff = (int32_t)(clamped_minimum - cmd_next_seq); if (diff > 0) cmd_next_seq = clamped_minimum;`. In practice the wrap is ~497 days at 50 Hz, so the bug is a long-tail concern, but consistency with the FC fix is the right time to land it.
+- [ ] **Reconcile wrap test with strict-monotonicity assertions in other tests** (Copilot review on `chore/bugfixes` for `tests/test_cmd_bridge_core.py`): `test_reserve_cmd_seq_wraps_after_int32_maximum` codifies that seqs may go `MAX → 0`, but `tests/test_cmd_bridge_send.py:35-37` and the e2e CMD tests assert `seqs[idx] > seqs[idx - 1]`. The two are consistent today only because no real test starts near `CMD_SEQ_MAX`, but the suite is internally inconsistent. When the modular-arithmetic rework above lands, also update the strict-`>` assertions to a wrap-aware helper (e.g. `assert_seq_advances(prev, curr)` doing modular comparison).
+- [ ] **Acceptance:** `pytest -q tests/fc/` green; new tests cover seq wrap, malformed desired_mode, stale-CMD-transition, locale safety, the `Manual+arm:true` ordering above, and the modular `cmd_next_seq` advancement above.
 
 ### S0.5 — Vision software fixes (no hardware needed)
 
@@ -686,6 +689,38 @@ If Eddi can move past these without John, they go in Sprint 0:
 - Sprint 1 reframed around John's tools (3D printer, soldering, harnessing) and first-flight progression.
 - ADR-001 through ADR-005 to be authored in S0.1.
 - Next session: start S0.1 (ADRs + doc updates) and S0.2 (dead-code purge) in parallel; expect them done in <2 hours.
+
+### 2026-05-04 — Eddi + Claude — second Copilot review pass
+
+- `chore/sprint0-docs` round 2 (this pass):
+  - Removed the lingering `PR-B2 backend ingest accepts tiny drift` reference
+    from the VIS datagram semantics in `message-spec.md` (round 1 missed it
+    on line ~181). Replaced with self-contained "receivers MAY accept ≤1e-6
+    drift; outside that range = drop+log" wording.
+  - Fixed the wrong ADR citation in `hil.md` for the `MspRcSink` failsafe
+    transition (was `ADR-003 / S0.4`, but ADR-003 is about arming; the
+    failsafe state machine is defined in S0.4). Now points only at S0.4.
+  - Narrowed the in-flight-behaviour gate in `hil.md` so doc-only edits to
+    `docs/message-spec.md` no longer trigger HIL replay. Implementation
+    changes that alter the wire contract still must update the spec; pure
+    doc edits don't gate.
+  - Added four explicit deferred-items rows to S0.4 of the development
+    plan: (a) the `Manual+arm:true` integration test that drives the real
+    main.cpp CMD-application path, (b) reworking `state.py`'s
+    `reserve_cmd_seq` / `ensure_cmd_seq_minimum` to use signed-modular
+    arithmetic alongside the FC seq filter rework, (c) replacing the strict
+    `seqs[i] > seqs[i-1]` assertions in `test_cmd_bridge_send.py` and the
+    e2e CMD tests with wrap-aware helpers when the modular rework lands.
+- `chore/bugfixes` round 2 (separate commit, separate branch):
+  - Fixed the empty-string Content-Length bypass in `app.py` (Copilot
+    flagged that `strip()` + `if content_length_text:` skips validation
+    when the header is present-but-empty, allowing the body read to
+    proceed unguarded).
+  - Added regression test for the empty-CL case.
+- Deferred (tracked in plan, not actioned this pass): the Manual-mode
+  throttle ordering bug itself (S0.4 — needs HIL replay per ADR-004), the
+  modular cmd_next_seq rework (S0.4 — paired with FC seq filter), and the
+  wrap-test consistency cleanup (S0.4 — paired with the modular rework).
 
 ### 2026-05-04 — Eddi + Claude — S0.1 Copilot review follow-up
 

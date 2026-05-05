@@ -129,7 +129,8 @@ Boot sequence:
    `msp_tx_ratio` (TEL field).
 
 Errors: short writes / `EAGAIN` retry once; persistent failure transitions
-the FC failsafe state machine to `StaleHard` (ADR-003 / S0.4).
+the FC failsafe state machine to `StaleHard` (see `docs/development_plan.md`
+S0.4 for the failsafe state-machine definition).
 
 ---
 
@@ -181,14 +182,20 @@ Expected gates (apply once the scripts above are committed):
 
 ## 5. Acceptance criteria
 
-A change touches in-flight behaviour if it modifies any of:
+A change touches in-flight behaviour if it modifies any of these
+implementations:
 
 - `src/fc/`
 - `src/backend/cmd_*.py`, `src/backend/tel_*.py`, `src/backend/vis_*.py`
 - `src/vision/vision_pipeline.py`, `src/vision/main.py` (the publish path)
-- `docs/message-spec.md`
 
-Such changes MUST include:
+Protocol implementations MUST also update `docs/message-spec.md` whenever
+they alter the wire contract, field meanings, or message timing/semantics.
+Documentation-only edits to `docs/message-spec.md` (e.g. clarifications,
+typo fixes, or adding optional documentation fields without an implementation
+change) do NOT, on their own, trigger the in-flight-behaviour gates below.
+
+In-flight-behaviour changes MUST include:
 
 - A unit test (where applicable).
 - A replay against at least one recorded mission scenario
