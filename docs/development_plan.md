@@ -437,11 +437,14 @@ Priority within Sprint 0: P0 → P1 → P2. P0 must be green by May 11; P1 shoul
 - [ ] Add the FULL_E2E run to at least one CI job (F42).
 - [x] **C++ unit tests via `ctest`** (added on `chore/sprint0-cleanup` follow-up).
   Top-level `CMakeLists.txt` calls `enable_testing()` and adds
-  `tests/fc/`. Tiny self-contained executables under `tests/fc/` use
-  `<cassert>` only (no test framework dep). Wired into both
-  `scripts/dev/runall.sh` and `.github/workflows/ci.yml` so regressions
-  break the build. First test: `tests/fc/test_rc_math.cpp` covering
-  the new `RcMath.h` PWM helpers.
+  `tests/fc/`. Tiny self-contained executables under `tests/fc/` use the
+  always-on `TEST_ASSERT` macro from `tests/fc/test_assert.h` (no test
+  framework dep). We deliberately avoid `<cassert>` because `assert()` is
+  compiled out under `-DNDEBUG`, which would let broken logic silently
+  pass in Release builds. Wired into both `scripts/dev/runall.sh` and
+  `.github/workflows/ci.yml` so regressions break the build. Tests so
+  far: `tests/fc/test_rc_math.cpp` (PWM helpers in `RcMath.h`) and
+  `tests/fc/test_clamp.cpp` (NaN-safe clamps in `Clamp.h`).
 
 ## Sprint 0 Acceptance Gate
 
