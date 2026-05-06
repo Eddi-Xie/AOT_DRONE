@@ -741,8 +741,11 @@ If Eddi can move past these without John, they go in Sprint 0:
     to fix later.
   - Smoke: `./build/src/fc/fc_app` boots, emits TEL seq=0 mode=2
     tracking_state=4, exits cleanly on signal.
-- Net diff: 5 files modified, 3 deleted, 2 new headers — 35 lines added,
-  133 removed. Pure cleanup; no runtime-behaviour change.
+- Net diff (`git diff dev..HEAD --stat` after all four commits in this PR):
+  11 files changed, 181 insertions(+), 133 deletions(-). The two new
+  headers carry most of the additions (`RcMath.h` 66 lines, `Clamp.h` 26),
+  with the rest in the Progress Log (54 lines) and small backend / vision
+  import lines. Pure cleanup; no runtime-behaviour change.
 
 ### 2026-05-04 — Eddi + Claude — second Copilot review pass
 
