@@ -77,36 +77,64 @@ export function getBackendConfig(): BackendConfig {
   const envWsUrl = import.meta.env.VITE_BACKEND_WS_URL as string | undefined;
   const envVideoUrl = import.meta.env.VITE_VIDEO_URL as string | undefined;
   const envOverlaySource = import.meta.env.VITE_OVERLAY_SOURCE as string | undefined;
+  const envApiToken = import.meta.env.VITE_BACKEND_API_TOKEN as string | undefined;
   const isDev = import.meta.env.DEV;
 
   const httpUrl = envHttpUrl && envHttpUrl.trim() ? envHttpUrl.trim() : DEFAULT_HTTP_URL;
   const videoUrl = envVideoUrl && envVideoUrl.trim() ? envVideoUrl.trim() : DEFAULT_VIDEO_URL;
-  const wsUrl = isDev
+  const baseWsUrl = isDev
     ? deriveDevWsUrl()
     : envWsUrl && envWsUrl.trim()
       ? normalizeWsUrl(envWsUrl.trim())
       : deriveWsUrl(httpUrl);
   const overlaySource = normalizeOverlaySource(envOverlaySource);
+  const apiToken = envApiToken && envApiToken.trim() ? envApiToken.trim() : undefined;
+
+  // Browsers can't attach Authorization to `new WebSocket(...)`, so we carry
+  // the token as a query param. The backend reads it from `?token=` and runs
+  // the same constant-time compare it does on the REST Authorization header.
+  const wsUrl = apiToken ? appendTokenQuery(baseWsUrl, apiToken) : baseWsUrl;
 
   return {
     httpUrl: trimTrailingSlash(httpUrl),
     wsUrl,
     videoUrl,
     overlaySource,
+    ...(apiToken ? { apiToken } : {}),
   };
 }
 
-export async function postIntent(httpBaseUrl: string, payload: IntentRequest): Promise<void> {
+function appendTokenQuery(rawWsUrl: string, token: string): string {
+  try {
+    const parsed = new URL(rawWsUrl, window.location.origin);
+    parsed.searchParams.set("token", token);
+    return parsed.toString();
+  } catch {
+    const separator = rawWsUrl.includes("?") ? "&" : "?";
+    return `${rawWsUrl}${separator}token=${encodeURIComponent(token)}`;
+  }
+}
+
+export async function postIntent(
+  httpBaseUrl: string,
+  payload: IntentRequest,
+  apiToken?: string,
+): Promise<void> {
   // In Vite dev, use same-origin path so the dev proxy handles backend routing.
   const endpoint = import.meta.env.DEV ? "/api/intent" : buildUrl(httpBaseUrl, "/api/intent");
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (apiToken) {
+    headers.Authorization = `Bearer ${apiToken}`;
+  }
 
   let response: Response;
   try {
     response = await fetch(endpoint, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
+      headers,
       body: JSON.stringify(payload),
     });
   } catch (error: unknown) {

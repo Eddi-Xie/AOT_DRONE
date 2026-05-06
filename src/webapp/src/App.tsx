@@ -466,7 +466,7 @@ export default function App(): JSX.Element {
       dispatch({ type: "INTENT_PENDING", message: "Sending intent..." });
 
       try {
-        await postIntent(backendConfig.httpUrl, payload);
+        await postIntent(backendConfig.httpUrl, payload, backendConfig.apiToken);
         dispatch({
           type: "INTENT_FINISHED",
           kind: "success",
@@ -483,7 +483,7 @@ export default function App(): JSX.Element {
         intentInFlightRef.current = false;
       }
     },
-    [backendConfig.httpUrl],
+    [backendConfig.httpUrl, backendConfig.apiToken],
   );
 
   const trackingBlockedReason = state.linkStatus?.tracking_blocked_reason ?? null;

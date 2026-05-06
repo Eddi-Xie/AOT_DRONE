@@ -116,6 +116,7 @@ export interface BackendConfig {
   wsUrl: string;
   videoUrl: string;
   overlaySource: OverlaySource;
+  apiToken?: string;
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

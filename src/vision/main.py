@@ -339,6 +339,7 @@ def run_loop(
             backend_http=config.backend_http,
             frame_endpoint=config.backend_frame_endpoint,
             max_jpeg_bytes=config.backend_video_max_jpeg_bytes,
+            api_token=os.environ.get("BACKEND_API_TOKEN") or None,
         )
 
     cv2_module: Any | None = None

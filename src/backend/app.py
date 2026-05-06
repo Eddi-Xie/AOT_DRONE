@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
+import logging
 import os
 import threading
 import time
@@ -8,7 +10,15 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -37,6 +47,8 @@ from .video_hub import (
 from .vis_ingest import VisUdpIngestor
 from .ws_manager import WsManager
 
+LOGGER = logging.getLogger(__name__)
+
 state = SharedState()
 
 _tel_stop_event = threading.Event()
@@ -62,6 +74,51 @@ _runtime_video_max_jpeg_bytes = VIDEO_MAX_JPEG_BYTES_DEFAULT
 _runtime_video_frame_fresh_s = 1.0
 _runtime_video_validate_decode = False
 
+# When set, all of /api/intent, /api/frame, and the /ws upgrade require the
+# token. When None (default / env unset), auth is disabled and the operator is
+# expected to bind the FastAPI server to 127.0.0.1.
+_runtime_api_token: str | None = None
+
+
+def _read_env_token(name: str) -> str | None:
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    stripped = raw.strip()
+    return stripped or None
+
+
+def _require_api_token(request: Request) -> None:
+    """Enforce bearer auth on REST routes when BACKEND_API_TOKEN is set.
+
+    No-op when auth is disabled. On mismatch raises 401. Constant-time compare
+    prevents trivial timing leaks of the secret.
+    """
+    expected = _runtime_api_token
+    if expected is None:
+        return
+    authorization = request.headers.get("authorization", "")
+    scheme, _, presented = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not presented:
+        raise HTTPException(status_code=401, detail="missing bearer token")
+    if not hmac.compare_digest(presented.strip(), expected):
+        raise HTTPException(status_code=401, detail="invalid bearer token")
+
+
+def _check_ws_token(presented: str | None) -> bool:
+    """Return True iff the token is acceptable for a WS upgrade.
+
+    Browsers cannot set Authorization on `new WebSocket(...)`, so the token is
+    carried as a `?token=` query param on the upgrade URL. Auth disabled =>
+    always accept.
+    """
+    expected = _runtime_api_token
+    if expected is None:
+        return True
+    if not presented:
+        return False
+    return hmac.compare_digest(presented.strip(), expected)
+
 
 class IntentRequest(BaseModel):
     desired_mode: int
@@ -75,6 +132,7 @@ def _startup() -> None:
     global _runtime_tel_fresh_s
     global _runtime_video_enabled, _runtime_video_fps, _runtime_video_max_jpeg_bytes
     global _runtime_video_frame_fresh_s, _runtime_video_validate_decode
+    global _runtime_api_token
     global _video_hub, _synthetic_jpeg_generator
 
     state.reset()
@@ -89,6 +147,14 @@ def _startup() -> None:
     )
     _runtime_video_frame_fresh_s = max(0.0, _read_env_float("BACKEND_VIDEO_FRAME_FRESH_S", 1.0))
     _runtime_video_validate_decode = _read_env_bool("BACKEND_VIDEO_VALIDATE_DECODE", False)
+    _runtime_api_token = _read_env_token("BACKEND_API_TOKEN")
+    if _runtime_api_token is None:
+        LOGGER.warning(
+            "BACKEND_API_TOKEN unset: /api/intent, /api/frame, and /ws are unauthenticated. "
+            "Bind FastAPI to 127.0.0.1 in this configuration."
+        )
+    else:
+        LOGGER.info("BACKEND_API_TOKEN set: bearer auth required on /api/intent, /api/frame, /ws.")
     _video_hub = VideoFrameHub()
     _synthetic_jpeg_generator = SyntheticJpegGenerator(width=640, height=360)
 
@@ -226,7 +292,7 @@ def vis_status(connected_threshold_s: float = Query(default=1.0, ge=0.0)) -> dic
     return state.get_vis_status(connected_threshold_s=connected_threshold_s)
 
 
-@app.post("/api/intent")
+@app.post("/api/intent", dependencies=[Depends(_require_api_token)])
 def post_intent(intent_req: IntentRequest) -> dict[str, Any]:
     if intent_req.desired_mode not in CONTROL_MODES:
         raise HTTPException(status_code=422, detail="desired_mode must be one of 0,1,2,3")
@@ -263,7 +329,7 @@ def api_status() -> dict[str, Any]:
     return status
 
 
-@app.post("/api/frame")
+@app.post("/api/frame", dependencies=[Depends(_require_api_token)])
 async def post_frame(request: Request) -> dict[str, Any]:
     if not _runtime_video_enabled:
         raise HTTPException(status_code=503, detail="video streaming is disabled")
@@ -408,7 +474,14 @@ async def video_stream(
 
 
 @app.websocket("/ws")
-async def ws_endpoint(ws: WebSocket) -> None:
+async def ws_endpoint(ws: WebSocket, token: str | None = Query(default=None)) -> None:
+    if not _check_ws_token(token):
+        # Close before accept so unauthorized clients see a clean handshake
+        # rejection instead of a brief "connected" flash. 4401 = app-defined
+        # "unauthorized" close code.
+        await ws.close(code=4401)
+        return
+
     await ws.accept()
 
     ws_manager = _ws_manager

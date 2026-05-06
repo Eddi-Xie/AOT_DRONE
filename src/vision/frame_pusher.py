@@ -40,6 +40,7 @@ class FramePusher:
         log_interval_s: float = 60.0,
         http_client: _HttpClientLike | None = None,
         jpeg_encoder: Callable[[np.ndarray, int], bytes] | None = None,
+        api_token: str | None = None,
     ) -> None:
         self.url = self._join_url(backend_http, frame_endpoint)
         self.max_jpeg_bytes = max(1, int(max_jpeg_bytes))
@@ -49,6 +50,7 @@ class FramePusher:
         self._jpeg_encoder = jpeg_encoder or encode_jpeg
         self._client = http_client or self._build_default_http_client(timeout_s=timeout_s)
         self._own_client = http_client is None
+        self._api_token = api_token.strip() if api_token else None
 
         self.push_ok = 0
         self.push_fail = 0
@@ -69,11 +71,15 @@ class FramePusher:
             )
             return False
 
+        headers: dict[str, str] = {"Content-Type": "image/jpeg"}
+        if self._api_token:
+            headers["Authorization"] = f"Bearer {self._api_token}"
+
         try:
             response = self._client.post(
                 self.url,
                 content=jpeg_bytes,
-                headers={"Content-Type": "image/jpeg"},
+                headers=headers,
             )
         except Exception as exc:
             self.push_fail += 1
