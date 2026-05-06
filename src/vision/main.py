@@ -8,6 +8,11 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+# Wire-contract constants are owned by the backend's protocol_constants module
+# (single source of truth). Vision imports the JPEG size cap from there so the
+# default can never drift between sender (vision) and receiver (backend).
+from src.backend.protocol_constants import VIDEO_MAX_JPEG_BYTES_DEFAULT
+
 from .camera import CameraSource
 from .detector import Detector
 from .frame_pusher import FramePusher
@@ -39,7 +44,7 @@ class VisionConfig:
     jpeg_quality: int = 80
     backend_http: str = "http://127.0.0.1:8000"
     backend_frame_endpoint: str = "/api/frame"
-    backend_video_max_jpeg_bytes: int = 200_000
+    backend_video_max_jpeg_bytes: int = VIDEO_MAX_JPEG_BYTES_DEFAULT
     vis_udp_host: str = "127.0.0.1"
     vis_udp_port: int = 9003
     pattern: str = "none"
@@ -266,7 +271,9 @@ def parse_args(argv: Sequence[str] | None = None) -> VisionConfig:
         desired_cy=args.desired_cy,
         no_frame_push=args.no_frame_push,
         no_vis_udp=args.no_vis_udp,
-        backend_video_max_jpeg_bytes=_read_env_int("BACKEND_VIDEO_MAX_JPEG_BYTES", 200_000),
+        backend_video_max_jpeg_bytes=_read_env_int(
+            "BACKEND_VIDEO_MAX_JPEG_BYTES", VIDEO_MAX_JPEG_BYTES_DEFAULT
+        ),
         preview=args.preview,
         max_frames=args.max_frames,
         no_output=args.no_output,

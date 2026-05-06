@@ -22,3 +22,4 @@ npm --prefix src/webapp run test
 npm --prefix src/webapp run build
 cmake -S . -B build
 cmake --build build -j
+ctest --test-dir build --output-on-failure

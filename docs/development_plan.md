@@ -435,6 +435,16 @@ Priority within Sprint 0: P0 → P1 → P2. P0 must be green by May 11; P1 shoul
 - [ ] `RUN_FULL_E2E=1 ./scripts/dev/e2e.sh` green.
 - [ ] `npm --prefix src/webapp run build && npm --prefix src/webapp run test` green.
 - [ ] Add the FULL_E2E run to at least one CI job (F42).
+- [x] **C++ unit tests via `ctest`** (added on `chore/sprint0-cleanup` follow-up).
+  Top-level `CMakeLists.txt` calls `enable_testing()` and adds
+  `tests/fc/`. Tiny self-contained executables under `tests/fc/` use the
+  always-on `TEST_ASSERT` macro from `tests/fc/test_assert.h` (no test
+  framework dep). We deliberately avoid `<cassert>` because `assert()` is
+  compiled out under `-DNDEBUG`, which would let broken logic silently
+  pass in Release builds. Wired into both `scripts/dev/runall.sh` and
+  `.github/workflows/ci.yml` so regressions break the build. Tests so
+  far: `tests/fc/test_rc_math.cpp` (PWM helpers in `RcMath.h`) and
+  `tests/fc/test_clamp.cpp` (NaN-safe clamps in `Clamp.h`).
 
 ## Sprint 0 Acceptance Gate
 
@@ -689,6 +699,81 @@ If Eddi can move past these without John, they go in Sprint 0:
 - Sprint 1 reframed around John's tools (3D printer, soldering, harnessing) and first-flight progression.
 - ADR-001 through ADR-005 to be authored in S0.1.
 - Next session: start S0.1 (ADRs + doc updates) and S0.2 (dead-code purge) in parallel; expect them done in <2 hours.
+
+### 2026-05-04 — Eddi + Claude — S0.2 dead-code purge + constants centralization
+
+- Branch: `chore/sprint0-cleanup` off `dev` (post-merge of `chore/sprint0-docs`
+  and `chore/bugfixes`).
+- Dead-code deletions (audit A-14, F18, Backend #20):
+  - `src/backend/udp_ingest.py` — earlier version of the UDP ingest path,
+    no imports anywhere.
+  - `src/backend/tcp_client.py` — earlier version of the TCP cmd bridge,
+    no imports anywhere.
+  - `src/fc/implementation/placeholder.cpp` — never referenced from
+    `src/fc/CMakeLists.txt`, scaffolding artefact.
+- `dist/` untracking (audit B17): no work needed — already covered by
+  `src/webapp/.gitignore` and the root `.gitignore`. The audit finding
+  was stale.
+- FC constants centralization (audit M-06, A-06):
+  - New `src/fc/header/Clamp.h`: `clamp_target_coord` and `clamp_unit` as
+    inline functions in `namespace fc`. Removes the duplicated definitions
+    from `FlightController.cpp:17-29` and `main.cpp:67-79`.
+  - New `src/fc/header/RcMath.h`: `kAxisRangeUs`, `kMaxYawRateDps`, and the
+    three PWM mappers (`normalized_axis_to_pwm`, `yaw_rate_to_pwm`,
+    `throttle_to_pwm`) as inline functions in `namespace fc::rc`. Removes
+    the duplicated `kMaxYawRateDps` (was at `FlightController.cpp:12` and
+    `main.cpp:21`) and pulls the PWM mapper bodies (`main.cpp:81-116`)
+    out of the binary's anonymous namespace into a header.
+  - `FlightController.cpp` and `main.cpp` now use `using` aliases to keep
+    call sites identical. No behavioural change. Header doc references
+    audit P2.9 for the future consolidation of
+    `kPitchRangeUs / kYawRangeUs / kAxisRangeUs` into a single
+    `RcStickRangeUs` (Sprint 1 control-quality work).
+- Backend / vision constants centralization (audit F46):
+  - `VIDEO_MAX_JPEG_BYTES_DEFAULT = 200_000` added to
+    `src/backend/protocol_constants.py` with a comment explaining why both
+    sides must default to the same value.
+  - `src/backend/app.py` and `src/vision/main.py` import the constant and
+    use it as the default for their `BACKEND_VIDEO_MAX_JPEG_BYTES` env-var
+    reads. Vision now imports from `src.backend.protocol_constants` —
+    accepted as a wire-contract dependency (vision and backend must agree
+    on this size).
+- Verification:
+  - `cmake --build build -j` clean.
+  - `python -m ruff check src tests` clean.
+  - `python -m pre_commit run --all-files` clean (ruff, ruff-format,
+    clang-format, file hygiene all green).
+  - `pytest -q` of the runnable subset (66 tests covering FC modes,
+    cmd bridge core, backend API validation, schemas, etc.) all pass.
+  - The pre-existing `tests.cmd_test_utils` / `tests.ws_test_utils`
+    `ModuleNotFoundError` collection errors for 9 test files are inherited
+    from `dev` and unrelated to S0.2 — separate pytest-discovery issue
+    to fix later.
+  - Smoke: `./build/src/fc/fc_app` boots, emits TEL seq=0 mode=2
+    tracking_state=4, exits cleanly on signal.
+- Branch scope after Copilot review rounds 1 and 2 (which also landed on
+  this PR): no longer a pure cleanup branch. In addition to the
+  dead-code deletions and constants centralization above, this branch now
+  also adds:
+  - C++ unit-test infrastructure (`enable_testing()` in the top-level
+    `CMakeLists.txt`, new `tests/fc/CMakeLists.txt`, `ctest` wired into
+    both `scripts/dev/runall.sh` and `.github/workflows/ci.yml`).
+  - First two C++ unit tests under `tests/fc/`: `test_rc_math.cpp`
+    (8 cases on the `RcMath.h` PWM helpers) and `test_clamp.cpp`
+    (6 cases on the `Clamp.h` NaN-safe helpers).
+  - Python sync regression suite `tests/test_video_max_jpeg_default_sync.py`
+    that drives the actual production paths (TestClient(app) lifecycle
+    on the backend side, `parse_args([])` on the vision side) so a
+    future re-hardcode of the JPEG-bytes default in either entry point
+    fails loudly.
+  - `src/vision/frame_pusher.py` constructor default now also pulls from
+    `VIDEO_MAX_JPEG_BYTES_DEFAULT` (round-1 review caught that the
+    centralization missed it).
+- Final stats from `git diff dev..HEAD --stat`:
+  18 files changed, 394 insertions(+), 134 deletions(-). The durable
+  takeaway: this PR spans cleanup + build/test wiring + regression
+  coverage, with no intended runtime-behaviour change beyond the new
+  verification surface.
 
 ### 2026-05-04 — Eddi + Claude — second Copilot review pass
 

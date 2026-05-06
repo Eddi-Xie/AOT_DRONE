@@ -8,6 +8,10 @@ from typing import Protocol
 
 import numpy as np
 
+# Wire-contract constant lives in the backend; the constructor default below
+# pulls from there so re-tuning the size cap stays single-source-of-truth.
+from src.backend.protocol_constants import VIDEO_MAX_JPEG_BYTES_DEFAULT
+
 from .jpeg import clamp_quality, encode_jpeg
 
 LOGGER = logging.getLogger(__name__)
@@ -30,7 +34,7 @@ class FramePusher:
         self,
         backend_http: str = "http://127.0.0.1:8000",
         frame_endpoint: str = "/api/frame",
-        max_jpeg_bytes: int = 200_000,
+        max_jpeg_bytes: int = VIDEO_MAX_JPEG_BYTES_DEFAULT,
         timeout_s: float = 1.0,
         retry_quality_step: int = 20,
         log_interval_s: float = 60.0,

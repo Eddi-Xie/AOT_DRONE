@@ -1,6 +1,8 @@
+#include "Clamp.h"
 #include "CommandServer.h"
 #include "FlightController.h"
 #include "ProtocolConstants.h"
+#include "RcMath.h"
 #include "TelemetryPublisher.h"
 
 #include <algorithm>
@@ -17,8 +19,12 @@
 namespace {
 
 constexpr int kTelHz = 50;
-constexpr double kAxisRangeUs = 300.0;
-constexpr double kMaxYawRateDps = 180.0;
+
+using fc::clamp_target_coord;
+using fc::clamp_unit;
+using fc::rc::normalized_axis_to_pwm;
+using fc::rc::throttle_to_pwm;
+using fc::rc::yaw_rate_to_pwm;
 
 std::atomic<bool> g_running{true};
 
@@ -62,57 +68,6 @@ bool to_tracking_state(int raw_state, fc::TrackingState& out_state) {
     default:
         return false;
     }
-}
-
-double clamp_target_coord(double value) {
-    if (!std::isfinite(value)) {
-        return 0.0;
-    }
-    return std::clamp(value, -1.0, 1.0);
-}
-
-double clamp_unit(double value) {
-    if (!std::isfinite(value)) {
-        return 0.0;
-    }
-    return std::clamp(value, 0.0, 1.0);
-}
-
-std::uint16_t normalized_axis_to_pwm(double normalized) {
-    if (!std::isfinite(normalized)) {
-        return fc::rc::DRONE_MID;
-    }
-
-    const double clamped = std::clamp(normalized, -1.0, 1.0);
-    const double pwm = static_cast<double>(fc::rc::DRONE_MID) + clamped * kAxisRangeUs;
-    return static_cast<std::uint16_t>(std::lround(std::clamp(
-        pwm, static_cast<double>(fc::rc::DRONE_MIN), static_cast<double>(fc::rc::DRONE_MAX))));
-}
-
-std::uint16_t yaw_rate_to_pwm(double yaw_rate_dps) {
-    if (!std::isfinite(yaw_rate_dps)) {
-        return fc::rc::DRONE_MID;
-    }
-
-    const double limited = std::clamp(yaw_rate_dps, -kMaxYawRateDps, kMaxYawRateDps);
-    const double normalized = limited / kMaxYawRateDps;
-    return normalized_axis_to_pwm(normalized);
-}
-
-std::uint16_t throttle_to_pwm(double throttle) {
-    if (!std::isfinite(throttle)) {
-        return fc::rc::DRONE_MIN;
-    }
-
-    if (throttle >= 0.0 && throttle <= 1.0) {
-        const double pwm = static_cast<double>(fc::rc::DRONE_MIN) +
-                           throttle * static_cast<double>(fc::rc::DRONE_MAX - fc::rc::DRONE_MIN);
-        return static_cast<std::uint16_t>(std::lround(std::clamp(
-            pwm, static_cast<double>(fc::rc::DRONE_MIN), static_cast<double>(fc::rc::DRONE_MAX))));
-    }
-
-    return static_cast<std::uint16_t>(std::lround(std::clamp(
-        throttle, static_cast<double>(fc::rc::DRONE_MIN), static_cast<double>(fc::rc::DRONE_MAX))));
 }
 
 void apply_setpoint_overrides(const fc::CommandFrame& cmd, fc::FlightController& controller) {
