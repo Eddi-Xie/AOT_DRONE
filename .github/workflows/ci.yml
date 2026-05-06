@@ -53,6 +53,9 @@ jobs:
       - name: Build
         run: cmake --build build -j
 
+      - name: C++ unit tests
+        run: ctest --test-dir build --output-on-failure
+
       - name: Python tests
         env:
           REQUIRE_UDP_BIND_TESTS: "1"
