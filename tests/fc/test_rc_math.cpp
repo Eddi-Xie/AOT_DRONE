@@ -14,6 +14,7 @@
 #include "RcConstants.h"
 #include "RcMath.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstdint>
@@ -34,14 +35,22 @@ void test_normalized_axis_to_pwm_centre_and_endpoints() {
     // Zero -> exact centre.
     assert(normalized_axis_to_pwm(0.0) == kMid);
 
-    // +1.0 -> centre + axis-range, clamped against DRONE_MAX.
-    const std::uint16_t expected_pos =
-        static_cast<std::uint16_t>(std::lround(static_cast<double>(kMid) + kAxisRange));
+    // +1.0 -> centre + axis-range, *clamped* against [DRONE_MIN, DRONE_MAX].
+    // The expected value below applies the same clamp the helper does, so
+    // this test pins the documented contract regardless of how
+    // kAxisRangeUs is tuned in future. With today's tuning
+    // (kAxisRangeUs=300, mid=1500, max=2000) the clamp is a no-op
+    // (1800 < 2000), but a future kAxisRangeUs > 500 would correctly
+    // saturate at DRONE_MAX, and this test must still pass.
+    const double pos_pwm = static_cast<double>(kMid) + kAxisRange;
+    const std::uint16_t expected_pos = static_cast<std::uint16_t>(
+        std::lround(std::clamp(pos_pwm, static_cast<double>(kMin), static_cast<double>(kMax))));
     assert(normalized_axis_to_pwm(1.0) == expected_pos);
 
-    // -1.0 -> symmetric.
-    const std::uint16_t expected_neg =
-        static_cast<std::uint16_t>(std::lround(static_cast<double>(kMid) - kAxisRange));
+    // -1.0 -> symmetric, clamped against [DRONE_MIN, DRONE_MAX].
+    const double neg_pwm = static_cast<double>(kMid) - kAxisRange;
+    const std::uint16_t expected_neg = static_cast<std::uint16_t>(
+        std::lround(std::clamp(neg_pwm, static_cast<double>(kMin), static_cast<double>(kMax))));
     assert(normalized_axis_to_pwm(-1.0) == expected_neg);
 }
 
