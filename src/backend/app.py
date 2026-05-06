@@ -19,6 +19,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -280,6 +281,33 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(lifespan=_lifespan)
+
+
+def _build_cors_origins() -> list[str]:
+    """Parse comma-separated origin list from BACKEND_CORS_ALLOW_ORIGINS.
+
+    Empty / unset => no CORS middleware (default-deny cross-origin). Operators
+    that serve the webapp from a different origin (e.g. a non-Vite static host)
+    set this to that origin explicitly.
+    """
+    raw = os.environ.get("BACKEND_CORS_ALLOW_ORIGINS", "").strip()
+    if not raw:
+        return []
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+
+_cors_origins = _build_cors_origins()
+if _cors_origins:
+    # `allow_credentials=False` keeps the model token-only (no cookies). The
+    # `Authorization` header is the only custom request header we need to
+    # whitelist; everything else is simple-CORS-safe.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
 
 
 @app.get("/health")
