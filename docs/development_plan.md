@@ -748,11 +748,29 @@ If Eddi can move past these without John, they go in Sprint 0:
     to fix later.
   - Smoke: `./build/src/fc/fc_app` boots, emits TEL seq=0 mode=2
     tracking_state=4, exits cleanly on signal.
-- Net diff (`git diff dev..HEAD --stat` after all four commits in this PR):
-  11 files changed, 181 insertions(+), 133 deletions(-). The two new
-  headers carry most of the additions (`RcMath.h` 66 lines, `Clamp.h` 26),
-  with the rest in the Progress Log (54 lines) and small backend / vision
-  import lines. Pure cleanup; no runtime-behaviour change.
+- Branch scope after Copilot review rounds 1 and 2 (which also landed on
+  this PR): no longer a pure cleanup branch. In addition to the
+  dead-code deletions and constants centralization above, this branch now
+  also adds:
+  - C++ unit-test infrastructure (`enable_testing()` in the top-level
+    `CMakeLists.txt`, new `tests/fc/CMakeLists.txt`, `ctest` wired into
+    both `scripts/dev/runall.sh` and `.github/workflows/ci.yml`).
+  - First two C++ unit tests under `tests/fc/`: `test_rc_math.cpp`
+    (8 cases on the `RcMath.h` PWM helpers) and `test_clamp.cpp`
+    (6 cases on the `Clamp.h` NaN-safe helpers).
+  - Python sync regression suite `tests/test_video_max_jpeg_default_sync.py`
+    that drives the actual production paths (TestClient(app) lifecycle
+    on the backend side, `parse_args([])` on the vision side) so a
+    future re-hardcode of the JPEG-bytes default in either entry point
+    fails loudly.
+  - `src/vision/frame_pusher.py` constructor default now also pulls from
+    `VIDEO_MAX_JPEG_BYTES_DEFAULT` (round-1 review caught that the
+    centralization missed it).
+- Final stats from `git diff dev..HEAD --stat`:
+  18 files changed, 394 insertions(+), 134 deletions(-). The durable
+  takeaway: this PR spans cleanup + build/test wiring + regression
+  coverage, with no intended runtime-behaviour change beyond the new
+  verification surface.
 
 ### 2026-05-04 — Eddi + Claude — second Copilot review pass
 
