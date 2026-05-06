@@ -94,6 +94,83 @@ def test_video_ingest_decode_validation_toggle(monkeypatch) -> None:
         assert "decode validation failed" in response.text
 
 
+def test_frame_ingest_rejects_chunked_header(monkeypatch) -> None:
+    # Sending Transfer-Encoding: chunked must be rejected up-front. The
+    # production hazard is an attacker bypassing the JPEG-byte cap by streaming
+    # an unbounded body with no Content-Length advertised. We reject before any
+    # body read happens.
+    require_udp_bind_or_skip()
+    configure_backend_ws_test_env(monkeypatch)
+    monkeypatch.setenv("BACKEND_VIDEO_ENABLED", "1")
+    monkeypatch.setenv("BACKEND_VIDEO_MAX_JPEG_BYTES", "200000")
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/frame",
+            content=_VALID_JPEG,
+            headers={
+                "content-type": "image/jpeg",
+                "transfer-encoding": "chunked",
+            },
+        )
+        assert response.status_code == 400
+        assert "chunked" in response.text.lower()
+
+
+def test_frame_ingest_rejects_chunked_streaming_body(monkeypatch) -> None:
+    # When the client sends an iterable body, httpx switches to chunked
+    # transfer encoding. We must reject before consuming the iterator past the
+    # first chunk so the worker never buffers an unbounded amount.
+    require_udp_bind_or_skip()
+    configure_backend_ws_test_env(monkeypatch)
+    monkeypatch.setenv("BACKEND_VIDEO_ENABLED", "1")
+    monkeypatch.setenv("BACKEND_VIDEO_MAX_JPEG_BYTES", "200000")
+
+    yielded: list[int] = []
+
+    def chunk_generator():
+        # Each chunk is well-formed JPEG-ish but cumulatively unbounded if
+        # someone kept pulling. We track yields to assert the server didn't
+        # consume the whole stream before responding.
+        for i in range(1000):
+            yielded.append(i)
+            yield b"\xff\xd8" + (b"x" * 1024) + b"\xff\xd9"
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/frame",
+            content=chunk_generator(),
+            headers={"content-type": "image/jpeg"},
+        )
+        assert response.status_code == 400
+        # Even if httpx eagerly drained a few chunks before the server's 400
+        # propagated, it must not have consumed all 1000.
+        assert len(yielded) < 1000
+
+
+def test_frame_ingest_requires_content_length(monkeypatch) -> None:
+    # With chunked already rejected, a request without Content-Length leaves
+    # the body unbounded. We refuse it with 411 rather than falling through to
+    # an unbounded body read.
+    require_udp_bind_or_skip()
+    configure_backend_ws_test_env(monkeypatch)
+    monkeypatch.setenv("BACKEND_VIDEO_ENABLED", "1")
+
+    with TestClient(app) as client:
+        # Build a request that explicitly omits Content-Length. httpx normally
+        # adds it from the body length, so we send empty bytes and pop the
+        # header on the prepared request.
+        request = client.build_request(
+            "POST",
+            "/api/frame",
+            content=b"",
+            headers={"content-type": "image/jpeg"},
+        )
+        request.headers.pop("content-length", None)
+        response = client.send(request)
+        assert response.status_code == 411
+
+
 def test_video_status_fields_present_when_video_disabled(monkeypatch) -> None:
     require_udp_bind_or_skip()
     configure_backend_ws_test_env(monkeypatch)

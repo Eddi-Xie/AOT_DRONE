@@ -277,47 +277,76 @@ async def post_frame(request: Request) -> dict[str, Any]:
         video_hub.record_bad_frame()
         raise HTTPException(status_code=400, detail="content-type must be image/jpeg")
 
-    content_length_header = request.headers.get("content-length")
-    if content_length_header is not None:
-        content_length_text = content_length_header.strip()
-        if not content_length_text:
-            # Present-but-empty Content-Length must not silently fall through
-            # to await request.body(); treat as a malformed header.
-            video_hub.record_bad_frame()
-            raise HTTPException(
-                status_code=400,
-                detail="invalid content-length header",
-            )
-        try:
-            content_length = int(content_length_text)
-        except ValueError:
-            video_hub.record_bad_frame()
-            raise HTTPException(
-                status_code=400,
-                detail="invalid content-length header",
-            ) from None
-        if content_length < 0:
-            video_hub.record_bad_frame()
-            raise HTTPException(status_code=400, detail="invalid content-length header")
-        if content_length > _runtime_video_max_jpeg_bytes:
-            video_hub.record_bad_frame()
-            detail = "content-length exceeds max size " f"({_runtime_video_max_jpeg_bytes} bytes)"
-            raise HTTPException(
-                status_code=400,
-                detail=detail,
-            )
-
-    payload = await request.body()
-    if len(payload) == 0:
-        video_hub.record_bad_frame()
-        raise HTTPException(status_code=400, detail="empty request body")
-
-    if len(payload) > _runtime_video_max_jpeg_bytes:
+    # Reject Transfer-Encoding: chunked outright. Vision (the only intended
+    # producer) always sends Content-Length; a chunked POST has no advertised
+    # size, so accepting it would let an attacker bypass the JPEG-byte cap by
+    # streaming an unbounded body and force the worker to buffer it before any
+    # size check could fire.
+    transfer_encoding = request.headers.get("transfer-encoding", "")
+    encodings = {token.strip().lower() for token in transfer_encoding.split(",") if token.strip()}
+    if "chunked" in encodings:
         video_hub.record_bad_frame()
         raise HTTPException(
             status_code=400,
-            detail=f"jpeg payload exceeds max size ({_runtime_video_max_jpeg_bytes} bytes)",
+            detail="transfer-encoding: chunked is not supported on /api/frame",
         )
+
+    max_bytes = _runtime_video_max_jpeg_bytes
+    content_length_header = request.headers.get("content-length")
+    if content_length_header is None:
+        # With chunked already rejected above, no Content-Length means we have
+        # no advertised body size. Refuse rather than fall through to an
+        # unbounded body read.
+        video_hub.record_bad_frame()
+        raise HTTPException(status_code=411, detail="content-length header is required")
+
+    content_length_text = content_length_header.strip()
+    if not content_length_text:
+        # Present-but-empty Content-Length must not silently fall through
+        # to await request.body(); treat as a malformed header.
+        video_hub.record_bad_frame()
+        raise HTTPException(
+            status_code=400,
+            detail="invalid content-length header",
+        )
+    try:
+        content_length = int(content_length_text)
+    except ValueError:
+        video_hub.record_bad_frame()
+        raise HTTPException(
+            status_code=400,
+            detail="invalid content-length header",
+        ) from None
+    if content_length < 0:
+        video_hub.record_bad_frame()
+        raise HTTPException(status_code=400, detail="invalid content-length header")
+    if content_length > max_bytes:
+        video_hub.record_bad_frame()
+        raise HTTPException(
+            status_code=400,
+            detail=f"content-length exceeds max size ({max_bytes} bytes)",
+        )
+
+    # Stream-read the body so a misreported Content-Length cannot trick us
+    # into buffering more than max_bytes before the size check fires.
+    chunks: list[bytes] = []
+    received = 0
+    async for chunk in request.stream():
+        if not chunk:
+            continue
+        received += len(chunk)
+        if received > max_bytes:
+            video_hub.record_bad_frame()
+            raise HTTPException(
+                status_code=400,
+                detail=f"jpeg payload exceeds max size ({max_bytes} bytes)",
+            )
+        chunks.append(chunk)
+    payload = b"".join(chunks)
+
+    if len(payload) == 0:
+        video_hub.record_bad_frame()
+        raise HTTPException(status_code=400, detail="empty request body")
 
     if not _looks_like_jpeg(payload):
         video_hub.record_bad_frame()
