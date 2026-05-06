@@ -36,6 +36,7 @@ from .protocol_constants import (
     UDP_VIS_PORT,
     VIDEO_MAX_JPEG_BYTES_DEFAULT,
 )
+from .rate_limit import IpRateLimiter
 from .state import SharedState
 from .tel_ingest import TelUdpIngestor
 from .video_hub import (
@@ -80,6 +81,12 @@ _runtime_video_validate_decode = False
 # expected to bind the FastAPI server to 127.0.0.1.
 _runtime_api_token: str | None = None
 
+# Per-IP rate limiters. None => limit disabled (env var set to 0). Capacity
+# equals the configured Hz so a 1-second burst is allowed before the steady
+# refill cap kicks in.
+_frame_rate_limiter: IpRateLimiter | None = None
+_intent_rate_limiter: IpRateLimiter | None = None
+
 
 def _read_env_token(name: str) -> str | None:
     raw = os.environ.get(name)
@@ -104,6 +111,26 @@ def _require_api_token(request: Request) -> None:
         raise HTTPException(status_code=401, detail="missing bearer token")
     if not hmac.compare_digest(presented.strip(), expected):
         raise HTTPException(status_code=401, detail="invalid bearer token")
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _rate_limit_frame(request: Request) -> None:
+    limiter = _frame_rate_limiter
+    if limiter is None:
+        return
+    if not limiter.allow(_client_ip(request)):
+        raise HTTPException(status_code=429, detail="frame rate limit exceeded")
+
+
+def _rate_limit_intent(request: Request) -> None:
+    limiter = _intent_rate_limiter
+    if limiter is None:
+        return
+    if not limiter.allow(_client_ip(request)):
+        raise HTTPException(status_code=429, detail="intent rate limit exceeded")
 
 
 def _check_ws_token(presented: str | None) -> bool:
@@ -134,6 +161,7 @@ def _startup() -> None:
     global _runtime_video_enabled, _runtime_video_fps, _runtime_video_max_jpeg_bytes
     global _runtime_video_frame_fresh_s, _runtime_video_validate_decode
     global _runtime_api_token
+    global _frame_rate_limiter, _intent_rate_limiter
     global _video_hub, _synthetic_jpeg_generator
 
     state.reset()
@@ -148,6 +176,18 @@ def _startup() -> None:
     )
     _runtime_video_frame_fresh_s = max(0.0, _read_env_float("BACKEND_VIDEO_FRAME_FRESH_S", 1.0))
     _runtime_video_validate_decode = _read_env_bool("BACKEND_VIDEO_VALIDATE_DECODE", False)
+    frame_rate_hz = max(0.0, _read_env_float("BACKEND_FRAME_RATE_LIMIT_HZ", 30.0))
+    intent_rate_hz = max(0.0, _read_env_float("BACKEND_INTENT_RATE_LIMIT_HZ", 5.0))
+    _frame_rate_limiter = (
+        IpRateLimiter(capacity=frame_rate_hz, refill_per_s=frame_rate_hz)
+        if frame_rate_hz > 0
+        else None
+    )
+    _intent_rate_limiter = (
+        IpRateLimiter(capacity=intent_rate_hz, refill_per_s=intent_rate_hz)
+        if intent_rate_hz > 0
+        else None
+    )
     _runtime_api_token = _read_env_token("BACKEND_API_TOKEN")
     if _runtime_api_token is None:
         LOGGER.warning(
@@ -320,7 +360,10 @@ def vis_status(connected_threshold_s: float = Query(default=1.0, ge=0.0)) -> dic
     return state.get_vis_status(connected_threshold_s=connected_threshold_s)
 
 
-@app.post("/api/intent", dependencies=[Depends(_require_api_token)])
+@app.post(
+    "/api/intent",
+    dependencies=[Depends(_rate_limit_intent), Depends(_require_api_token)],
+)
 def post_intent(intent_req: IntentRequest) -> dict[str, Any]:
     if intent_req.desired_mode not in CONTROL_MODES:
         raise HTTPException(status_code=422, detail="desired_mode must be one of 0,1,2,3")
@@ -357,7 +400,10 @@ def api_status() -> dict[str, Any]:
     return status
 
 
-@app.post("/api/frame", dependencies=[Depends(_require_api_token)])
+@app.post(
+    "/api/frame",
+    dependencies=[Depends(_rate_limit_frame), Depends(_require_api_token)],
+)
 async def post_frame(request: Request) -> dict[str, Any]:
     if not _runtime_video_enabled:
         raise HTTPException(status_code=503, detail="video streaming is disabled")
