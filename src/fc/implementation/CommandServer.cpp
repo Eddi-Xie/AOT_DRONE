@@ -65,8 +65,12 @@ bool CommandServer::start() {
     if (bind_host_.empty() || bind_host_ == "0.0.0.0") {
         addr.sin_addr.s_addr = INADDR_ANY;
     } else if (inet_pton(AF_INET, bind_host_.c_str(), &addr.sin_addr) != 1) {
+        // inet_pton accepts any dotted-quad IPv4 literal; it does not resolve
+        // hostnames (e.g. "localhost" is rejected). Message reflects the
+        // actual accepted input set.
         std::cerr << "[FC] CommandServer: invalid bind host '" << bind_host_
-                  << "', refusing to start (use 127.0.0.1 or 0.0.0.0)\n";
+                  << "', refusing to start (use a dotted-quad IPv4 literal "
+                     "such as 127.0.0.1, or 0.0.0.0 to bind all interfaces)\n";
         ::close(fd);
         return false;
     }
