@@ -362,7 +362,7 @@ def vis_status(connected_threshold_s: float = Query(default=1.0, ge=0.0)) -> dic
 
 @app.post(
     "/api/intent",
-    dependencies=[Depends(_rate_limit_intent), Depends(_require_api_token)],
+    dependencies=[Depends(_require_api_token), Depends(_rate_limit_intent)],
 )
 def post_intent(intent_req: IntentRequest) -> dict[str, Any]:
     if intent_req.desired_mode not in CONTROL_MODES:
@@ -402,7 +402,7 @@ def api_status() -> dict[str, Any]:
 
 @app.post(
     "/api/frame",
-    dependencies=[Depends(_rate_limit_frame), Depends(_require_api_token)],
+    dependencies=[Depends(_require_api_token), Depends(_rate_limit_frame)],
 )
 async def post_frame(request: Request) -> dict[str, Any]:
     if not _runtime_video_enabled:
