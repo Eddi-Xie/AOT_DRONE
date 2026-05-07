@@ -130,6 +130,30 @@ def test_frame_rate_limit_refills_after_time_passes(monkeypatch) -> None:
         assert post_frame() == 200
 
 
+def test_sub_one_hz_limit_allows_one_request_per_period(monkeypatch) -> None:
+    # Regression: with capacity == hz and hz < 1.0, tokens are capped below
+    # the 1.0 release threshold and every request would be blocked. Capacity
+    # floors to 1.0 so 0.5 Hz behaves as "one allowed request per 2 s".
+    require_udp_bind_or_skip()
+    configure_backend_ws_test_env(monkeypatch)
+    monkeypatch.setenv("BACKEND_INTENT_RATE_LIMIT_HZ", "0.5")
+    monkeypatch.delenv("BACKEND_API_TOKEN", raising=False)
+    fake_now = _freeze_rate_limit_clock(monkeypatch)
+
+    with TestClient(app) as client:
+
+        def post_intent() -> int:
+            return client.post("/api/intent", json={"desired_mode": 0}).status_code
+
+        # Bucket starts full (capacity floor = 1.0).
+        assert post_intent() == 200
+        assert post_intent() == 429
+        # 2.0 s later => refill 0.5/s * 2.0 = 1.0 token => one more allowed.
+        fake_now[0] += 2.0
+        assert post_intent() == 200
+        assert post_intent() == 429
+
+
 def test_rate_limit_disabled_when_hz_is_zero(monkeypatch) -> None:
     require_udp_bind_or_skip()
     configure_backend_ws_test_env(monkeypatch)

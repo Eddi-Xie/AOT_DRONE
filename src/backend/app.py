@@ -222,13 +222,18 @@ def _startup() -> None:
     _runtime_video_validate_decode = _read_env_bool("BACKEND_VIDEO_VALIDATE_DECODE", False)
     frame_rate_hz = max(0.0, _read_env_float("BACKEND_FRAME_RATE_LIMIT_HZ", 30.0))
     intent_rate_hz = max(0.0, _read_env_float("BACKEND_INTENT_RATE_LIMIT_HZ", 5.0))
+    # Capacity floors at 1 token: TokenBucket.allow only releases when tokens
+    # >= 1.0, but the bucket caps at capacity. With capacity == hz < 1.0
+    # (e.g. 0.5 Hz = "1 request every 2 s") tokens would never reach 1.0 and
+    # every request would be denied. Floor to 1.0 so sub-1 Hz limits behave as
+    # "one allowed request per (1 / hz) seconds".
     _frame_rate_limiter = (
-        IpRateLimiter(capacity=frame_rate_hz, refill_per_s=frame_rate_hz)
+        IpRateLimiter(capacity=max(1.0, frame_rate_hz), refill_per_s=frame_rate_hz)
         if frame_rate_hz > 0
         else None
     )
     _intent_rate_limiter = (
-        IpRateLimiter(capacity=intent_rate_hz, refill_per_s=intent_rate_hz)
+        IpRateLimiter(capacity=max(1.0, intent_rate_hz), refill_per_s=intent_rate_hz)
         if intent_rate_hz > 0
         else None
     )
