@@ -469,20 +469,20 @@ async def post_frame(request: Request) -> dict[str, Any]:
 
     # Stream-read the body so a misreported Content-Length cannot trick us
     # into buffering more than max_bytes before the size check fires.
-    chunks: list[bytes] = []
-    received = 0
+    # Single growing bytearray (not a list-then-join) so this DoS-hardened
+    # path doesn't transiently double-allocate the payload at the join step
+    # — the bytearray reuses one buffer that doubles as needed.
+    payload = bytearray()
     async for chunk in request.stream():
         if not chunk:
             continue
-        received += len(chunk)
-        if received > max_bytes:
+        if len(payload) + len(chunk) > max_bytes:
             video_hub.record_bad_frame()
             raise HTTPException(
                 status_code=400,
                 detail=f"jpeg payload exceeds max size ({max_bytes} bytes)",
             )
-        chunks.append(chunk)
-    payload = b"".join(chunks)
+        payload.extend(chunk)
 
     if len(payload) == 0:
         video_hub.record_bad_frame()
