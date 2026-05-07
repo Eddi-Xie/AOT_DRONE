@@ -10,7 +10,11 @@ namespace fc {
 
 class CommandServer {
   public:
-    explicit CommandServer(int port);
+    // bind_host defaults to "127.0.0.1" so the FC TCP listener is loopback-
+    // only out of the box. Operators that intentionally need cross-host CMD
+    // ingress (e.g. dev with backend on a different machine) pass "0.0.0.0"
+    // explicitly. main.cpp drives this from the FC_BIND_HOST env var.
+    explicit CommandServer(int port, std::string bind_host = "127.0.0.1");
     ~CommandServer();
     bool start();
     void stop();
@@ -26,6 +30,7 @@ class CommandServer {
 
   private:
     int port_;
+    std::string bind_host_;
     int listen_fd_ = -1;
     int client_fd_ = -1;
     std::thread worker_;

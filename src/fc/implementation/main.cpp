@@ -11,9 +11,11 @@
 #include <cmath>
 #include <csignal>
 #include <cstdint>
+#include <cstdlib>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <string>
 #include <thread>
 
 namespace {
@@ -157,11 +159,21 @@ int main() {
     std::signal(SIGINT, handle_signal);
     std::signal(SIGTERM, handle_signal);
 
-    fc::CommandServer command_server(proto::TCP_CMD_PORT);
+    // Default to loopback so a misconfigured deployment doesn't accidentally
+    // expose the FC TCP listener to the LAN. Operators that intentionally need
+    // remote ingress (e.g. backend on a different machine) set FC_BIND_HOST.
+    const char* fc_bind_host_env = std::getenv("FC_BIND_HOST");
+    const std::string fc_bind_host =
+        (fc_bind_host_env && *fc_bind_host_env) ? std::string(fc_bind_host_env) : "127.0.0.1";
+
+    fc::CommandServer command_server(proto::TCP_CMD_PORT, fc_bind_host);
     if (!command_server.start()) {
-        std::cerr << "[FC] Failed to start CommandServer on port " << proto::TCP_CMD_PORT << "\n";
+        std::cerr << "[FC] Failed to start CommandServer on " << fc_bind_host << ":"
+                  << proto::TCP_CMD_PORT << "\n";
         return 1;
     }
+    std::cout << "[FC] CommandServer listening on " << fc_bind_host << ":" << proto::TCP_CMD_PORT
+              << "\n";
 
     fc::TelemetryPublisher telemetry_publisher("127.0.0.1", proto::UDP_TEL_PORT);
     if (!telemetry_publisher.ok()) {
