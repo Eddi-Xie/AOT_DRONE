@@ -8,10 +8,10 @@ hit the 429 quickly without blowing test runtime.
 from __future__ import annotations
 
 import base64
-import time
 
 from fastapi.testclient import TestClient
 
+import src.backend.rate_limit as rate_limit_module
 from src.backend.app import app
 from src.backend.rate_limit import IpRateLimiter, TokenBucket
 from tests.ws_test_utils import configure_backend_ws_test_env, require_udp_bind_or_skip
@@ -52,15 +52,28 @@ def test_ip_rate_limiter_buckets_per_ip() -> None:
     assert limiter.allow("10.0.0.2")
 
 
+def _freeze_rate_limit_clock(monkeypatch) -> list[float]:
+    """Pin the rate-limit module's clock so refill never advances mid-test.
+
+    Returns the single-element list holding the fake "now"; tests can mutate
+    its value to advance time deterministically. Avoids the previous wall-clock
+    elapsed-bound check, which could spuriously fail on a slow CI runner.
+    """
+    fake_now = [1000.0]
+    monkeypatch.setattr(rate_limit_module.time, "monotonic", lambda: fake_now[0])
+    return fake_now
+
+
 def test_intent_rate_limit_returns_429_after_burst(monkeypatch) -> None:
     require_udp_bind_or_skip()
     configure_backend_ws_test_env(monkeypatch)
     monkeypatch.setenv("BACKEND_INTENT_RATE_LIMIT_HZ", "3")  # capacity = 3
     monkeypatch.delenv("BACKEND_API_TOKEN", raising=False)
+    _freeze_rate_limit_clock(monkeypatch)
 
     with TestClient(app) as client:
-        # Burst the capacity within a single time slice; refill < 1 token
-        # accumulates, so the 4th must 429.
+        # Time is frozen, so refill stays at zero; the 4th request must 429
+        # regardless of how long the actual TestClient call takes.
         codes = [client.post("/api/intent", json={"desired_mode": 0}).status_code for _ in range(4)]
         assert codes[:3] == [200, 200, 200]
         assert codes[3] == 429
@@ -72,11 +85,10 @@ def test_frame_rate_limit_returns_429_after_burst(monkeypatch) -> None:
     monkeypatch.setenv("BACKEND_FRAME_RATE_LIMIT_HZ", "2")
     monkeypatch.setenv("BACKEND_VIDEO_ENABLED", "1")
     monkeypatch.delenv("BACKEND_API_TOKEN", raising=False)
+    _freeze_rate_limit_clock(monkeypatch)
 
     with TestClient(app) as client:
-        # Same TestClient = same IP "testclient", so all 4 hits share one
-        # bucket. We call them tight-loop so the refill barely advances.
-        start = time.monotonic()
+        # Time frozen => refill never advances => 3rd and 4th must 429.
         codes = []
         for _ in range(4):
             response = client.post(
@@ -85,12 +97,37 @@ def test_frame_rate_limit_returns_429_after_burst(monkeypatch) -> None:
                 headers={"content-type": "image/jpeg"},
             )
             codes.append(response.status_code)
-        elapsed = time.monotonic() - start
-        # Refill 2 tokens/sec; with capacity=2 the 3rd request needs >=0.5 s
-        # to refill a token. The whole loop should run faster than that.
-        assert elapsed < 0.5, f"loop took {elapsed:.3f}s, refill would skew test"
         assert codes[:2] == [200, 200]
-        assert 429 in codes[2:]
+        assert codes[2] == 429
+        assert codes[3] == 429
+
+
+def test_frame_rate_limit_refills_after_time_passes(monkeypatch) -> None:
+    # Companion test: with the clock advanced past the refill interval,
+    # the 3rd request gets a fresh token. Pins the refill semantics
+    # without relying on wall-clock sleep.
+    require_udp_bind_or_skip()
+    configure_backend_ws_test_env(monkeypatch)
+    monkeypatch.setenv("BACKEND_FRAME_RATE_LIMIT_HZ", "2")
+    monkeypatch.setenv("BACKEND_VIDEO_ENABLED", "1")
+    monkeypatch.delenv("BACKEND_API_TOKEN", raising=False)
+    fake_now = _freeze_rate_limit_clock(monkeypatch)
+
+    with TestClient(app) as client:
+
+        def post_frame() -> int:
+            return client.post(
+                "/api/frame",
+                content=_VALID_JPEG,
+                headers={"content-type": "image/jpeg"},
+            ).status_code
+
+        assert post_frame() == 200
+        assert post_frame() == 200
+        assert post_frame() == 429
+        # Advance 0.6 s @ 2 Hz refill => 1.2 tokens accrued.
+        fake_now[0] += 0.6
+        assert post_frame() == 200
 
 
 def test_rate_limit_disabled_when_hz_is_zero(monkeypatch) -> None:
