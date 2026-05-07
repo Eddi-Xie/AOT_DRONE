@@ -77,6 +77,7 @@ export function getBackendConfig(): BackendConfig {
   const envWsUrl = import.meta.env.VITE_BACKEND_WS_URL as string | undefined;
   const envVideoUrl = import.meta.env.VITE_VIDEO_URL as string | undefined;
   const envOverlaySource = import.meta.env.VITE_OVERLAY_SOURCE as string | undefined;
+  const envApiToken = import.meta.env.VITE_BACKEND_API_TOKEN as string | undefined;
   const isDev = import.meta.env.DEV;
 
   const httpUrl = envHttpUrl && envHttpUrl.trim() ? envHttpUrl.trim() : DEFAULT_HTTP_URL;
@@ -87,26 +88,41 @@ export function getBackendConfig(): BackendConfig {
       ? normalizeWsUrl(envWsUrl.trim())
       : deriveWsUrl(httpUrl);
   const overlaySource = normalizeOverlaySource(envOverlaySource);
+  const apiToken = envApiToken && envApiToken.trim() ? envApiToken.trim() : undefined;
 
+  // The token rides on `Sec-WebSocket-Protocol` (a subprotocol value), not on
+  // the URL — see ReconnectingWsClient. Subprotocol headers stay out of
+  // reverse-proxy access logs, browser history, and referrer chains, all of
+  // which would routinely capture a `?token=` query param.
   return {
     httpUrl: trimTrailingSlash(httpUrl),
     wsUrl,
     videoUrl,
     overlaySource,
+    ...(apiToken ? { apiToken } : {}),
   };
 }
 
-export async function postIntent(httpBaseUrl: string, payload: IntentRequest): Promise<void> {
+export async function postIntent(
+  httpBaseUrl: string,
+  payload: IntentRequest,
+  apiToken?: string,
+): Promise<void> {
   // In Vite dev, use same-origin path so the dev proxy handles backend routing.
   const endpoint = import.meta.env.DEV ? "/api/intent" : buildUrl(httpBaseUrl, "/api/intent");
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (apiToken) {
+    headers.Authorization = `Bearer ${apiToken}`;
+  }
 
   let response: Response;
   try {
     response = await fetch(endpoint, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
+      headers,
       body: JSON.stringify(payload),
     });
   } catch (error: unknown) {

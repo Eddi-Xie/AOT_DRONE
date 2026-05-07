@@ -45,6 +45,13 @@ interface ReconnectingWsClientOptions {
   onConnectionChange: (connected: boolean) => void;
   minBackoffMs?: number;
   maxBackoffMs?: number;
+  /**
+   * Sec-WebSocket-Protocol subprotocols to offer on the upgrade. The backend
+   * uses `aot.bearer.<token>` to carry the API token here instead of in the
+   * URL — subprotocol headers stay out of reverse-proxy logs, browser
+   * history, and referrer chains.
+   */
+  subprotocols?: string[];
 }
 
 export class ReconnectingWsClient {
@@ -53,6 +60,7 @@ export class ReconnectingWsClient {
   private readonly onConnectionChange: (connected: boolean) => void;
   private readonly minBackoffMs: number;
   private readonly maxBackoffMs: number;
+  private readonly subprotocols: string[] | undefined;
 
   private ws: WebSocket | null = null;
   private reconnectTimerId: number | null = null;
@@ -66,6 +74,9 @@ export class ReconnectingWsClient {
     this.onConnectionChange = options.onConnectionChange;
     this.minBackoffMs = options.minBackoffMs ?? 500;
     this.maxBackoffMs = options.maxBackoffMs ?? 5000;
+    this.subprotocols = options.subprotocols && options.subprotocols.length > 0
+      ? [...options.subprotocols]
+      : undefined;
     this.reconnectDelayMs = this.minBackoffMs;
   }
 
@@ -95,7 +106,9 @@ export class ReconnectingWsClient {
     this.clearReconnectTimer();
 
     try {
-      this.ws = new WebSocket(this.url);
+      this.ws = this.subprotocols
+        ? new WebSocket(this.url, this.subprotocols)
+        : new WebSocket(this.url);
     } catch {
       this.scheduleReconnect();
       return;

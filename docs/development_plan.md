@@ -871,4 +871,71 @@ If Eddi can move past these without John, they go in Sprint 0:
   `chore/sprint0-docs`. The `cmd_age_s` field documented in this PR is
   already emitted by `fc_app` (`src/fc/implementation/main.cpp:186`).
 
+### 2026-05-06 — Eddi + Claude — S0.3 network safety (`chore/sprint0-network`)
+
+- Branch `chore/sprint0-network` off `dev` (post-merge of `chore/sprint0-cleanup`).
+  Five logical commits, one per S0.3 sub-item, plus this Progress Log entry:
+  1. `feat(backend): reject chunked /api/frame uploads + stream-bounded body
+     read` — closes the OOM/DoS hazard where a chunked POST with no
+     Content-Length would buffer unbounded bytes before the size check
+     fired. Three layered defences: reject Transfer-Encoding: chunked
+     outright, require Content-Length explicitly (411 otherwise), and
+     stream-read with a running cap so a misreported CL still aborts mid-body.
+     Three new regression tests in `tests/test_video_ingest_endpoint.py`.
+  2. `feat(backend,vision,webapp): bearer-token auth on /api/intent,
+     /api/frame, /ws` — `BACKEND_API_TOKEN` env. REST routes use a FastAPI
+     `Depends(_require_api_token)` parsing `Authorization: Bearer <token>`
+     with `hmac.compare_digest`. The /ws upgrade reads the bearer token from
+     `Sec-WebSocket-Protocol` using an `aot.bearer.<token>` subprotocol value
+     (browsers cannot set Authorization on `new WebSocket(...)`) and closes
+     pre-accept with code 4401 on mismatch. Vision FramePusher gains an
+     `api_token` kwarg; webapp `BackendConfig` gains optional `apiToken` from
+     `VITE_BACKEND_API_TOKEN`. Token unset preserves current local-dev
+     behaviour and emits a startup WARN telling the operator to bind 127.0.0.1.
+     9 cases in `tests/test_api_auth.py`. (The initial commit on this branch
+     used a `?token=` query param; switched to subprotocol on Copilot review
+     because URL query params get logged by reverse proxies, browser history,
+     and referrer chains.)
+  3. `feat(backend): env-driven CORS middleware` — `BACKEND_CORS_ALLOW_ORIGINS`
+     comma-separated allowlist. Empty/unset => no middleware (default-deny
+     cross-origin), preserving the Vite-proxy dev path. `allow_credentials=False`
+     and `Authorization`/`Content-Type` whitelisted. Tests use an isolated
+     fresh FastAPI app rather than `importlib.reload` of the singleton — the
+     reload approach orphaned `app.state` from other tests' TestClient
+     lifespans and broke `test_ws_vis_update_broadcast.py` (worth remembering:
+     don't reload `src.backend.app` in tests).
+  4. `feat(backend): per-IP token-bucket rate limit on /api/frame and
+     /api/intent` — homegrown limiter (no slowapi, no async-middleware
+     framework lock-in). New `src/backend/rate_limit.py` with `TokenBucket`
+     and `IpRateLimiter`. Defaults: 30 Hz frame, 5 Hz intent; configurable
+     via `BACKEND_FRAME_RATE_LIMIT_HZ` / `BACKEND_INTENT_RATE_LIMIT_HZ`;
+     0 disables. Per-IP bucket dict is unbounded — LRU eviction is a
+     follow-up. 5 cases in `tests/test_rate_limit.py`.
+  5. `feat(fc): default TCP listener to 127.0.0.1 with FC_BIND_HOST opt-in` —
+     `CommandServer` was binding `INADDR_ANY` regardless of deployment, so
+     anyone on the LAN with the port could deliver CMD frames. New
+     `bind_host` parameter (defaults to `127.0.0.1`); `inet_pton` validates
+     the host up-front so a typo refuses to start instead of silently
+     falling back to ANY. Smoke-tested across default / `0.0.0.0` /
+     garbage-host states.
+- Verification (every commit ended green):
+  - `python -m pre_commit run --all-files` clean.
+  - `pytest -q tests/` 113 passed, 1 skipped (UDP-bind dependent).
+  - `npm --prefix src/webapp run build` + `vitest` 5/5.
+  - `cmake --build build -j` clean; `ctest` 2/2.
+  - FC binary smoke: default loopback, `FC_BIND_HOST=0.0.0.0`, and bad-host
+    refusal all behave as expected.
+- Wire-contract callouts the spec already covers; no `docs/message-spec.md`
+  changes were needed for S0.3 because the new behaviour is auth/transport
+  rather than payload schema. The new env vars (`BACKEND_API_TOKEN`,
+  `BACKEND_CORS_ALLOW_ORIGINS`, `BACKEND_FRAME_RATE_LIMIT_HZ`,
+  `BACKEND_INTENT_RATE_LIMIT_HZ`, `FC_BIND_HOST`) deserve a deployment-guide
+  entry — deferred to whichever PR adds `docs/deployment.md` (none planned
+  yet; capture in the next docs sweep).
+- Next session: S0.4 (FC software fixes — seq filter rework with std::optional
+  + signed-modular wrap math, stale-CMD hysteresis 0.5/1.5 s, `FC_TEL_HOST`
+  env, `last_cmd_` race, locale-safe JSON, plus the deferred Manual+arm:true
+  ordering bug from `chore/bugfixes`). Branch `chore/sprint0-fc-software`
+  once #23 (this one) merges.
+
 ### (future entries here)

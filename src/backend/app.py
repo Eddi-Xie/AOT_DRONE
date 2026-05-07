@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
+import logging
 import os
 import threading
 import time
@@ -8,7 +10,16 @@ from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    Depends,
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -25,6 +36,7 @@ from .protocol_constants import (
     UDP_VIS_PORT,
     VIDEO_MAX_JPEG_BYTES_DEFAULT,
 )
+from .rate_limit import IpRateLimiter
 from .state import SharedState
 from .tel_ingest import TelUdpIngestor
 from .video_hub import (
@@ -36,6 +48,8 @@ from .video_hub import (
 )
 from .vis_ingest import VisUdpIngestor
 from .ws_manager import WsManager
+
+LOGGER = logging.getLogger(__name__)
 
 state = SharedState()
 
@@ -62,6 +76,121 @@ _runtime_video_max_jpeg_bytes = VIDEO_MAX_JPEG_BYTES_DEFAULT
 _runtime_video_frame_fresh_s = 1.0
 _runtime_video_validate_decode = False
 
+# When set, all of /api/intent, /api/frame, and the /ws upgrade require the
+# token. When None (default / env unset), auth is disabled and the operator is
+# expected to bind the FastAPI server to 127.0.0.1.
+_runtime_api_token: str | None = None
+
+# Per-IP rate limiters. None => limit disabled (env var set to 0). Capacity
+# equals the configured Hz so a 1-second burst is allowed before the steady
+# refill cap kicks in.
+_frame_rate_limiter: IpRateLimiter | None = None
+_intent_rate_limiter: IpRateLimiter | None = None
+
+
+# RFC 7230 tchar grammar — the character class permitted in an HTTP token.
+# Sec-WebSocket-Protocol values must be tokens (RFC 6455 §4.1), so any byte
+# outside this set in the API token would silently break the WS handshake
+# while REST bearer auth kept working. We validate at startup so a misformed
+# token surfaces immediately rather than as a confusing "WS rejects but
+# REST works" production puzzle.
+_HTTP_TOKEN_TCHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyz" "ABCDEFGHIJKLMNOPQRSTUVWXYZ" "0123456789" "!#$%&'*+-.^_`|~"
+)
+
+
+def _is_http_token(value: str) -> bool:
+    return bool(value) and all(c in _HTTP_TOKEN_TCHARS for c in value)
+
+
+def _read_env_token(name: str) -> str | None:
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    stripped = raw.strip()
+    if not stripped:
+        return None
+    if not _is_http_token(stripped):
+        # Refuse to start instead of silently accepting a token that will
+        # break the WS subprotocol path. `secrets.token_hex` and
+        # `secrets.token_urlsafe` both produce tchar-safe tokens; arbitrary
+        # bytes (spaces, quotes, slashes) do not.
+        raise ValueError(
+            f"{name} contains characters that are not HTTP-token-safe. "
+            "Use a token of alphanumerics + any of !#$%&'*+-.^_`|~ "
+            "(secrets.token_hex / secrets.token_urlsafe both produce "
+            "valid tokens)."
+        )
+    return stripped
+
+
+def _require_api_token(request: Request) -> None:
+    """Enforce bearer auth on REST routes when BACKEND_API_TOKEN is set.
+
+    No-op when auth is disabled. On mismatch raises 401. Constant-time compare
+    prevents trivial timing leaks of the secret.
+    """
+    expected = _runtime_api_token
+    if expected is None:
+        return
+    authorization = request.headers.get("authorization", "")
+    scheme, _, presented = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not presented:
+        raise HTTPException(status_code=401, detail="missing bearer token")
+    if not hmac.compare_digest(presented.strip(), expected):
+        raise HTTPException(status_code=401, detail="invalid bearer token")
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _rate_limit_frame(request: Request) -> None:
+    limiter = _frame_rate_limiter
+    if limiter is None:
+        return
+    if not limiter.allow(_client_ip(request)):
+        raise HTTPException(status_code=429, detail="frame rate limit exceeded")
+
+
+def _rate_limit_intent(request: Request) -> None:
+    limiter = _intent_rate_limiter
+    if limiter is None:
+        return
+    if not limiter.allow(_client_ip(request)):
+        raise HTTPException(status_code=429, detail="intent rate limit exceeded")
+
+
+_WS_BEARER_PREFIX = "aot.bearer."
+
+
+def _select_ws_subprotocol(offered: list[str]) -> tuple[bool, str | None]:
+    """Decide the WS upgrade based on offered Sec-WebSocket-Protocol values.
+
+    Returns (accept, echo): `accept=True` means the upgrade is authorized;
+    `echo` is the subprotocol to echo back on accept (None if no protocol
+    was offered or auth is disabled).
+
+    Why subprotocol and not `?token=` query string: browsers cannot set
+    Authorization on `new WebSocket(...)`, but they can pass subprotocols.
+    Subprotocols ride in the Sec-WebSocket-Protocol header, which (unlike
+    the URL) is not captured by typical reverse-proxy access logs, browser
+    history, or referrer chains.
+    """
+    expected = _runtime_api_token
+    if expected is None:
+        # Auth disabled: accept whatever the client offered (or nothing).
+        return True, offered[0] if offered else None
+    for proto in offered:
+        if proto.startswith(_WS_BEARER_PREFIX):
+            presented = proto[len(_WS_BEARER_PREFIX) :]
+            if hmac.compare_digest(presented, expected):
+                # Echo the matched protocol so the browser's WebSocket
+                # handshake succeeds (RFC 6455: server SHOULD select one of
+                # the offered subprotocols when responding).
+                return True, proto
+    return False, None
+
 
 class IntentRequest(BaseModel):
     desired_mode: int
@@ -75,6 +204,8 @@ def _startup() -> None:
     global _runtime_tel_fresh_s
     global _runtime_video_enabled, _runtime_video_fps, _runtime_video_max_jpeg_bytes
     global _runtime_video_frame_fresh_s, _runtime_video_validate_decode
+    global _runtime_api_token
+    global _frame_rate_limiter, _intent_rate_limiter
     global _video_hub, _synthetic_jpeg_generator
 
     state.reset()
@@ -89,6 +220,31 @@ def _startup() -> None:
     )
     _runtime_video_frame_fresh_s = max(0.0, _read_env_float("BACKEND_VIDEO_FRAME_FRESH_S", 1.0))
     _runtime_video_validate_decode = _read_env_bool("BACKEND_VIDEO_VALIDATE_DECODE", False)
+    frame_rate_hz = max(0.0, _read_env_float("BACKEND_FRAME_RATE_LIMIT_HZ", 30.0))
+    intent_rate_hz = max(0.0, _read_env_float("BACKEND_INTENT_RATE_LIMIT_HZ", 5.0))
+    # Capacity floors at 1 token: TokenBucket.allow only releases when tokens
+    # >= 1.0, but the bucket caps at capacity. With capacity == hz < 1.0
+    # (e.g. 0.5 Hz = "1 request every 2 s") tokens would never reach 1.0 and
+    # every request would be denied. Floor to 1.0 so sub-1 Hz limits behave as
+    # "one allowed request per (1 / hz) seconds".
+    _frame_rate_limiter = (
+        IpRateLimiter(capacity=max(1.0, frame_rate_hz), refill_per_s=frame_rate_hz)
+        if frame_rate_hz > 0
+        else None
+    )
+    _intent_rate_limiter = (
+        IpRateLimiter(capacity=max(1.0, intent_rate_hz), refill_per_s=intent_rate_hz)
+        if intent_rate_hz > 0
+        else None
+    )
+    _runtime_api_token = _read_env_token("BACKEND_API_TOKEN")
+    if _runtime_api_token is None:
+        LOGGER.warning(
+            "BACKEND_API_TOKEN unset: /api/intent, /api/frame, and /ws are unauthenticated. "
+            "Bind FastAPI to 127.0.0.1 in this configuration."
+        )
+    else:
+        LOGGER.info("BACKEND_API_TOKEN set: bearer auth required on /api/intent, /api/frame, /ws.")
     _video_hub = VideoFrameHub()
     _synthetic_jpeg_generator = SyntheticJpegGenerator(width=640, height=360)
 
@@ -216,6 +372,33 @@ async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(lifespan=_lifespan)
 
 
+def _build_cors_origins() -> list[str]:
+    """Parse comma-separated origin list from BACKEND_CORS_ALLOW_ORIGINS.
+
+    Empty / unset => no CORS middleware (default-deny cross-origin). Operators
+    that serve the webapp from a different origin (e.g. a non-Vite static host)
+    set this to that origin explicitly.
+    """
+    raw = os.environ.get("BACKEND_CORS_ALLOW_ORIGINS", "").strip()
+    if not raw:
+        return []
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+
+_cors_origins = _build_cors_origins()
+if _cors_origins:
+    # `allow_credentials=False` keeps the model token-only (no cookies). The
+    # `Authorization` header is the only custom request header we need to
+    # whitelist; everything else is simple-CORS-safe.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
+    )
+
+
 @app.get("/health")
 def health() -> dict[str, bool]:
     return {"ok": True}
@@ -226,7 +409,10 @@ def vis_status(connected_threshold_s: float = Query(default=1.0, ge=0.0)) -> dic
     return state.get_vis_status(connected_threshold_s=connected_threshold_s)
 
 
-@app.post("/api/intent")
+@app.post(
+    "/api/intent",
+    dependencies=[Depends(_require_api_token), Depends(_rate_limit_intent)],
+)
 def post_intent(intent_req: IntentRequest) -> dict[str, Any]:
     if intent_req.desired_mode not in CONTROL_MODES:
         raise HTTPException(status_code=422, detail="desired_mode must be one of 0,1,2,3")
@@ -263,7 +449,10 @@ def api_status() -> dict[str, Any]:
     return status
 
 
-@app.post("/api/frame")
+@app.post(
+    "/api/frame",
+    dependencies=[Depends(_require_api_token), Depends(_rate_limit_frame)],
+)
 async def post_frame(request: Request) -> dict[str, Any]:
     if not _runtime_video_enabled:
         raise HTTPException(status_code=503, detail="video streaming is disabled")
@@ -277,47 +466,76 @@ async def post_frame(request: Request) -> dict[str, Any]:
         video_hub.record_bad_frame()
         raise HTTPException(status_code=400, detail="content-type must be image/jpeg")
 
-    content_length_header = request.headers.get("content-length")
-    if content_length_header is not None:
-        content_length_text = content_length_header.strip()
-        if not content_length_text:
-            # Present-but-empty Content-Length must not silently fall through
-            # to await request.body(); treat as a malformed header.
-            video_hub.record_bad_frame()
-            raise HTTPException(
-                status_code=400,
-                detail="invalid content-length header",
-            )
-        try:
-            content_length = int(content_length_text)
-        except ValueError:
-            video_hub.record_bad_frame()
-            raise HTTPException(
-                status_code=400,
-                detail="invalid content-length header",
-            ) from None
-        if content_length < 0:
-            video_hub.record_bad_frame()
-            raise HTTPException(status_code=400, detail="invalid content-length header")
-        if content_length > _runtime_video_max_jpeg_bytes:
-            video_hub.record_bad_frame()
-            detail = "content-length exceeds max size " f"({_runtime_video_max_jpeg_bytes} bytes)"
-            raise HTTPException(
-                status_code=400,
-                detail=detail,
-            )
-
-    payload = await request.body()
-    if len(payload) == 0:
-        video_hub.record_bad_frame()
-        raise HTTPException(status_code=400, detail="empty request body")
-
-    if len(payload) > _runtime_video_max_jpeg_bytes:
+    # Reject Transfer-Encoding: chunked outright. Vision (the only intended
+    # producer) always sends Content-Length; a chunked POST has no advertised
+    # size, so accepting it would let an attacker bypass the JPEG-byte cap by
+    # streaming an unbounded body and force the worker to buffer it before any
+    # size check could fire.
+    transfer_encoding = request.headers.get("transfer-encoding", "")
+    encodings = {token.strip().lower() for token in transfer_encoding.split(",") if token.strip()}
+    if "chunked" in encodings:
         video_hub.record_bad_frame()
         raise HTTPException(
             status_code=400,
-            detail=f"jpeg payload exceeds max size ({_runtime_video_max_jpeg_bytes} bytes)",
+            detail="transfer-encoding: chunked is not supported on /api/frame",
         )
+
+    max_bytes = _runtime_video_max_jpeg_bytes
+    content_length_header = request.headers.get("content-length")
+    if content_length_header is None:
+        # With chunked already rejected above, no Content-Length means we have
+        # no advertised body size. Refuse rather than fall through to an
+        # unbounded body read.
+        video_hub.record_bad_frame()
+        raise HTTPException(status_code=411, detail="content-length header is required")
+
+    content_length_text = content_length_header.strip()
+    if not content_length_text:
+        # Present-but-empty Content-Length must not silently fall through
+        # to await request.body(); treat as a malformed header.
+        video_hub.record_bad_frame()
+        raise HTTPException(
+            status_code=400,
+            detail="invalid content-length header",
+        )
+    try:
+        content_length = int(content_length_text)
+    except ValueError:
+        video_hub.record_bad_frame()
+        raise HTTPException(
+            status_code=400,
+            detail="invalid content-length header",
+        ) from None
+    if content_length < 0:
+        video_hub.record_bad_frame()
+        raise HTTPException(status_code=400, detail="invalid content-length header")
+    if content_length > max_bytes:
+        video_hub.record_bad_frame()
+        raise HTTPException(
+            status_code=400,
+            detail=f"content-length exceeds max size ({max_bytes} bytes)",
+        )
+
+    # Stream-read the body so a misreported Content-Length cannot trick us
+    # into buffering more than max_bytes before the size check fires.
+    # Single growing bytearray (not a list-then-join) so this DoS-hardened
+    # path doesn't transiently double-allocate the payload at the join step
+    # — the bytearray reuses one buffer that doubles as needed.
+    payload = bytearray()
+    async for chunk in request.stream():
+        if not chunk:
+            continue
+        if len(payload) + len(chunk) > max_bytes:
+            video_hub.record_bad_frame()
+            raise HTTPException(
+                status_code=400,
+                detail=f"jpeg payload exceeds max size ({max_bytes} bytes)",
+            )
+        payload.extend(chunk)
+
+    if len(payload) == 0:
+        video_hub.record_bad_frame()
+        raise HTTPException(status_code=400, detail="empty request body")
 
     if not _looks_like_jpeg(payload):
         video_hub.record_bad_frame()
@@ -380,7 +598,19 @@ async def video_stream(
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket) -> None:
-    await ws.accept()
+    offered_protocols = list(ws.scope.get("subprotocols", []))
+    accept, echo_protocol = _select_ws_subprotocol(offered_protocols)
+    if not accept:
+        # Close before accept so unauthorized clients see a clean handshake
+        # rejection instead of a brief "connected" flash. 4401 = app-defined
+        # "unauthorized" close code.
+        await ws.close(code=4401)
+        return
+
+    if echo_protocol is None:
+        await ws.accept()
+    else:
+        await ws.accept(subprotocol=echo_protocol)
 
     ws_manager = _ws_manager
     broadcaster = _broadcaster
