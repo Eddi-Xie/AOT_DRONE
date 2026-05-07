@@ -1,4 +1,5 @@
 #include "Clamp.h"
+#include "CmdSeq.h"
 #include "CommandServer.h"
 #include "FlightController.h"
 #include "ProtocolConstants.h"
@@ -14,6 +15,7 @@
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -189,7 +191,13 @@ int main() {
     std::cout << "[FC] fc_app running. CMD TCP:" << proto::TCP_CMD_PORT
               << " TEL UDP:127.0.0.1:" << proto::UDP_TEL_PORT << "\n";
 
-    int last_cmd_seq = -1;
+    // Signed-modular int32 comparator on cmd.seq handles wrap correctly:
+    // a fresh seq of 0 after CMD_SEQ_MAX is treated as "ahead by 1", not
+    // "behind by 2^31 - 1". `std::nullopt` => no CMD seen yet, so the first
+    // valid frame is always accepted regardless of its seq value (closes
+    // the `last_cmd_seq = -1` sentinel hole that collided with seq=0 after
+    // backend reseed).
+    std::optional<std::int32_t> last_cmd_seq;
     uint64_t tel_seq = 0;
 
     const auto period = std::chrono::milliseconds(1000 / kTelHz);
@@ -202,8 +210,10 @@ int main() {
         last_tick = now;
 
         fc::CommandFrame cmd;
-        if (command_server.latest_command(cmd) && cmd.seq != last_cmd_seq) {
-            last_cmd_seq = cmd.seq;
+        if (command_server.latest_command(cmd) &&
+            (!last_cmd_seq.has_value() ||
+             fc::cmd::seq_advances(*last_cmd_seq, static_cast<std::int32_t>(cmd.seq)))) {
+            last_cmd_seq = static_cast<std::int32_t>(cmd.seq);
 
             fc::ControlMode desired_mode = fc::ControlMode::LandSafely;
             if (to_control_mode(cmd.desired_mode, desired_mode)) {

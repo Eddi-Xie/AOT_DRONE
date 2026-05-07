@@ -7,10 +7,33 @@ from typing import Any
 
 CMD_SEQ_MAX = 2_147_483_647
 _CMD_SEQ_MOD = CMD_SEQ_MAX + 1
+_CMD_SEQ_HALF = _CMD_SEQ_MOD // 2
 
 
 def _initial_cmd_seq() -> int:
     return int(time.monotonic() * 1000.0) % _CMD_SEQ_MOD
+
+
+def _seq_advances(prev: int, candidate: int) -> bool:
+    """Return True iff `candidate` is strictly ahead of `prev` in cmd_seq's
+    wrapping space.
+
+    cmd_seq lives in [0, CMD_SEQ_MAX] (signed int32 max), wrapping at
+    CMD_SEQ_MAX -> 0. This comparator uses signed-modular semantics so wrap
+    is handled correctly: a candidate of 0 after a prev of CMD_SEQ_MAX is
+    treated as "ahead by 1", not "behind by 2^31 - 1".
+
+    Mirrors fc::cmd::seq_advances in src/fc/header/CmdSeq.h. Both sides MUST
+    use the same boundary semantics or wrap-state restarts (e.g.
+    `CmdBridge(seq_start=high)` against a backend that has wrapped to a low
+    cmd_next_seq) will silently re-issue old seqs that the FC then rejects.
+
+    Returns False when `candidate == prev` (dedup) and when the forward
+    modular distance exceeds half the space (treated as a backward jump,
+    not a tiny forward one across the boundary).
+    """
+    diff = (candidate - prev) % _CMD_SEQ_MOD
+    return 0 < diff <= _CMD_SEQ_HALF
 
 
 _TEL_DROP_REASON_ATTRS = {
@@ -227,7 +250,12 @@ class SharedState:
         with self.lock:
             if minimum is not None:
                 clamped_minimum = max(0, min(int(minimum), CMD_SEQ_MAX))
-                if self.cmd_next_seq < clamped_minimum:
+                # Signed-modular comparison: bump cmd_next_seq forward iff the
+                # caller-supplied minimum is "ahead" in the wrap space. A
+                # linear `<` here would silently let a wrap-state cmd_next_seq
+                # (small, just-wrapped) ignore a high `minimum` from a
+                # CmdBridge restart, causing seq reuse against a wrap-aware FC.
+                if _seq_advances(self.cmd_next_seq, clamped_minimum):
                     self.cmd_next_seq = clamped_minimum
             seq = self.cmd_next_seq
             self.cmd_next_seq = 0 if seq >= CMD_SEQ_MAX else seq + 1
@@ -236,7 +264,7 @@ class SharedState:
     def ensure_cmd_seq_minimum(self, minimum: int) -> None:
         with self.lock:
             clamped_minimum = max(0, min(int(minimum), CMD_SEQ_MAX))
-            if self.cmd_next_seq < clamped_minimum:
+            if _seq_advances(self.cmd_next_seq, clamped_minimum):
                 self.cmd_next_seq = clamped_minimum
 
     def record_last_cmd_payload(self, payload: dict[str, Any], payload_bytes: int) -> None:

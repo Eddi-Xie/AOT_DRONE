@@ -7,6 +7,7 @@ from src.backend.app import app
 from tests.integration.e2e_test_utils import configure_backend_e2e_env
 from tests.integration.fake_fc_server import FakeFcServer, require_tcp_bind_or_skip
 from tests.integration.status_poll_utils import wait_for_status
+from tests.seq_test_utils import assert_seqs_strictly_advance
 
 
 def test_e2e_cmd_gating_no_vis(monkeypatch) -> None:
@@ -55,8 +56,8 @@ def test_e2e_cmd_gating_no_vis(monkeypatch) -> None:
         seqs = [
             int(msg["seq"]) for msg in fc_server.received_cmds() if isinstance(msg.get("seq"), int)
         ]
-        for idx in range(1, len(seqs)):
-            assert seqs[idx] > seqs[idx - 1]
+        # Wrap-aware: strict `>` would misfire at the CMD_SEQ_MAX -> 0 boundary.
+        assert_seqs_strictly_advance(seqs)
         assert status["tracking_blocked_reason"] == "no_vis"
         assert fc_server.framing_errors == []
         assert fc_server.json_errors == []
