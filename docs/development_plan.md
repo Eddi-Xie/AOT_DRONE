@@ -885,13 +885,17 @@ If Eddi can move past these without John, they go in Sprint 0:
   2. `feat(backend,vision,webapp): bearer-token auth on /api/intent,
      /api/frame, /ws` — `BACKEND_API_TOKEN` env. REST routes use a FastAPI
      `Depends(_require_api_token)` parsing `Authorization: Bearer <token>`
-     with `hmac.compare_digest`. The /ws upgrade reads `?token=` query param
+     with `hmac.compare_digest`. The /ws upgrade reads the bearer token from
+     `Sec-WebSocket-Protocol` using an `aot.bearer.<token>` subprotocol value
      (browsers cannot set Authorization on `new WebSocket(...)`) and closes
      pre-accept with code 4401 on mismatch. Vision FramePusher gains an
      `api_token` kwarg; webapp `BackendConfig` gains optional `apiToken` from
      `VITE_BACKEND_API_TOKEN`. Token unset preserves current local-dev
      behaviour and emits a startup WARN telling the operator to bind 127.0.0.1.
-     9 cases in `tests/test_api_auth.py`.
+     9 cases in `tests/test_api_auth.py`. (The initial commit on this branch
+     used a `?token=` query param; switched to subprotocol on Copilot review
+     because URL query params get logged by reverse proxies, browser history,
+     and referrer chains.)
   3. `feat(backend): env-driven CORS middleware` — `BACKEND_CORS_ALLOW_ORIGINS`
      comma-separated allowlist. Empty/unset => no middleware (default-deny
      cross-origin), preserving the Vite-proxy dev path. `allow_credentials=False`
