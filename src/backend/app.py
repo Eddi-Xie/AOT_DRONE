@@ -88,12 +88,40 @@ _frame_rate_limiter: IpRateLimiter | None = None
 _intent_rate_limiter: IpRateLimiter | None = None
 
 
+# RFC 7230 tchar grammar — the character class permitted in an HTTP token.
+# Sec-WebSocket-Protocol values must be tokens (RFC 6455 §4.1), so any byte
+# outside this set in the API token would silently break the WS handshake
+# while REST bearer auth kept working. We validate at startup so a misformed
+# token surfaces immediately rather than as a confusing "WS rejects but
+# REST works" production puzzle.
+_HTTP_TOKEN_TCHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyz" "ABCDEFGHIJKLMNOPQRSTUVWXYZ" "0123456789" "!#$%&'*+-.^_`|~"
+)
+
+
+def _is_http_token(value: str) -> bool:
+    return bool(value) and all(c in _HTTP_TOKEN_TCHARS for c in value)
+
+
 def _read_env_token(name: str) -> str | None:
     raw = os.environ.get(name)
     if raw is None:
         return None
     stripped = raw.strip()
-    return stripped or None
+    if not stripped:
+        return None
+    if not _is_http_token(stripped):
+        # Refuse to start instead of silently accepting a token that will
+        # break the WS subprotocol path. `secrets.token_hex` and
+        # `secrets.token_urlsafe` both produce tchar-safe tokens; arbitrary
+        # bytes (spaces, quotes, slashes) do not.
+        raise ValueError(
+            f"{name} contains characters that are not HTTP-token-safe. "
+            "Use a token of alphanumerics + any of !#$%&'*+-.^_`|~ "
+            "(secrets.token_hex / secrets.token_urlsafe both produce "
+            "valid tokens)."
+        )
+    return stripped
 
 
 def _require_api_token(request: Request) -> None:

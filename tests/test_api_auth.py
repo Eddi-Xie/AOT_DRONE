@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 
+import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
@@ -136,6 +137,43 @@ def test_ws_accepts_upgrade_with_correct_token(monkeypatch) -> None:
             # First envelope is LINK_STATUS sent immediately on accept.
             envelope = ws.receive_json()
             assert envelope["event"] == "LINK_STATUS"
+
+
+@pytest.mark.parametrize(
+    "bad_token",
+    [
+        "has spaces",
+        'has"quotes',
+        "has/slash",
+        "has,comma",
+        "has(paren)",
+        "has@at",
+    ],
+)
+def test_invalid_api_token_refuses_startup(monkeypatch, bad_token: str) -> None:
+    # WebSocket subprotocol values must match the HTTP-token grammar. A token
+    # with non-tchar bytes would silently break /ws while REST kept working.
+    # Validation runs in _startup, so the lifespan raises and TestClient
+    # surfaces the ValueError up.
+    require_udp_bind_or_skip()
+    configure_backend_ws_test_env(monkeypatch)
+    monkeypatch.setenv("BACKEND_API_TOKEN", bad_token)
+
+    with pytest.raises(ValueError, match="HTTP-token-safe"):
+        with TestClient(app):
+            pass
+
+
+def test_valid_tchar_api_token_starts(monkeypatch) -> None:
+    # Counterpart: every char in the standard tchar set should start cleanly.
+    require_udp_bind_or_skip()
+    configure_backend_ws_test_env(monkeypatch)
+    monkeypatch.setenv("BACKEND_API_TOKEN", "abcXYZ012-._~+!#$%&'*^`|")
+
+    with TestClient(app) as client:
+        # Auth-enabled smoke: REST without header => 401.
+        response = client.post("/api/intent", json={"desired_mode": 0})
+        assert response.status_code == 401
 
 
 def test_auth_disabled_when_token_unset(monkeypatch) -> None:
