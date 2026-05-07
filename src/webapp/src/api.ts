@@ -82,7 +82,7 @@ export function getBackendConfig(): BackendConfig {
 
   const httpUrl = envHttpUrl && envHttpUrl.trim() ? envHttpUrl.trim() : DEFAULT_HTTP_URL;
   const videoUrl = envVideoUrl && envVideoUrl.trim() ? envVideoUrl.trim() : DEFAULT_VIDEO_URL;
-  const baseWsUrl = isDev
+  const wsUrl = isDev
     ? deriveDevWsUrl()
     : envWsUrl && envWsUrl.trim()
       ? normalizeWsUrl(envWsUrl.trim())
@@ -90,11 +90,10 @@ export function getBackendConfig(): BackendConfig {
   const overlaySource = normalizeOverlaySource(envOverlaySource);
   const apiToken = envApiToken && envApiToken.trim() ? envApiToken.trim() : undefined;
 
-  // Browsers can't attach Authorization to `new WebSocket(...)`, so we carry
-  // the token as a query param. The backend reads it from `?token=` and runs
-  // the same constant-time compare it does on the REST Authorization header.
-  const wsUrl = apiToken ? appendTokenQuery(baseWsUrl, apiToken) : baseWsUrl;
-
+  // The token rides on `Sec-WebSocket-Protocol` (a subprotocol value), not on
+  // the URL — see ReconnectingWsClient. Subprotocol headers stay out of
+  // reverse-proxy access logs, browser history, and referrer chains, all of
+  // which would routinely capture a `?token=` query param.
   return {
     httpUrl: trimTrailingSlash(httpUrl),
     wsUrl,
@@ -102,17 +101,6 @@ export function getBackendConfig(): BackendConfig {
     overlaySource,
     ...(apiToken ? { apiToken } : {}),
   };
-}
-
-function appendTokenQuery(rawWsUrl: string, token: string): string {
-  try {
-    const parsed = new URL(rawWsUrl, window.location.origin);
-    parsed.searchParams.set("token", token);
-    return parsed.toString();
-  } catch {
-    const separator = rawWsUrl.includes("?") ? "&" : "?";
-    return `${rawWsUrl}${separator}token=${encodeURIComponent(token)}`;
-  }
 }
 
 export async function postIntent(

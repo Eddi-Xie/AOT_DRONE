@@ -2,8 +2,8 @@
 
 When `BACKEND_API_TOKEN` is unset, all three remain unauthenticated for local
 dev (matched by the existing test suite). When it is set, requests without a
-matching Authorization header (REST) or `?token=` query param (WS) must be
-rejected before any work is done.
+matching Authorization header (REST) or `aot.bearer.<token>` Sec-WebSocket-
+Protocol subprotocol (WS) must be rejected before any work is done.
 """
 
 from __future__ import annotations
@@ -96,7 +96,8 @@ def test_frame_accepts_request_with_correct_token(monkeypatch) -> None:
         assert response.status_code == 200
 
 
-def test_ws_rejects_upgrade_without_token(monkeypatch) -> None:
+def test_ws_rejects_upgrade_without_subprotocol(monkeypatch) -> None:
+    # Auth on, client offers no subprotocol => reject pre-accept.
     _enable_auth(monkeypatch)
     with TestClient(app) as client:
         try:
@@ -111,7 +112,18 @@ def test_ws_rejects_upgrade_with_wrong_token(monkeypatch) -> None:
     _enable_auth(monkeypatch)
     with TestClient(app) as client:
         try:
-            with client.websocket_connect(f"/ws?token={_WRONG_TOKEN}"):
+            with client.websocket_connect("/ws", subprotocols=[f"aot.bearer.{_WRONG_TOKEN}"]):
+                raise AssertionError("expected ws upgrade to be rejected")
+        except WebSocketDisconnect as exc:
+            assert exc.code == 4401
+
+
+def test_ws_rejects_upgrade_with_unrelated_subprotocol(monkeypatch) -> None:
+    # Auth on, client offers a non-bearer subprotocol => still reject.
+    _enable_auth(monkeypatch)
+    with TestClient(app) as client:
+        try:
+            with client.websocket_connect("/ws", subprotocols=["chat.v1"]):
                 raise AssertionError("expected ws upgrade to be rejected")
         except WebSocketDisconnect as exc:
             assert exc.code == 4401
@@ -120,7 +132,7 @@ def test_ws_rejects_upgrade_with_wrong_token(monkeypatch) -> None:
 def test_ws_accepts_upgrade_with_correct_token(monkeypatch) -> None:
     _enable_auth(monkeypatch)
     with TestClient(app) as client:
-        with client.websocket_connect(f"/ws?token={_TOKEN}") as ws:
+        with client.websocket_connect("/ws", subprotocols=[f"aot.bearer.{_TOKEN}"]) as ws:
             # First envelope is LINK_STATUS sent immediately on accept.
             envelope = ws.receive_json()
             assert envelope["event"] == "LINK_STATUS"

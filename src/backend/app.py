@@ -133,19 +133,35 @@ def _rate_limit_intent(request: Request) -> None:
         raise HTTPException(status_code=429, detail="intent rate limit exceeded")
 
 
-def _check_ws_token(presented: str | None) -> bool:
-    """Return True iff the token is acceptable for a WS upgrade.
+_WS_BEARER_PREFIX = "aot.bearer."
 
-    Browsers cannot set Authorization on `new WebSocket(...)`, so the token is
-    carried as a `?token=` query param on the upgrade URL. Auth disabled =>
-    always accept.
+
+def _select_ws_subprotocol(offered: list[str]) -> tuple[bool, str | None]:
+    """Decide the WS upgrade based on offered Sec-WebSocket-Protocol values.
+
+    Returns (accept, echo): `accept=True` means the upgrade is authorized;
+    `echo` is the subprotocol to echo back on accept (None if no protocol
+    was offered or auth is disabled).
+
+    Why subprotocol and not `?token=` query string: browsers cannot set
+    Authorization on `new WebSocket(...)`, but they can pass subprotocols.
+    Subprotocols ride in the Sec-WebSocket-Protocol header, which (unlike
+    the URL) is not captured by typical reverse-proxy access logs, browser
+    history, or referrer chains.
     """
     expected = _runtime_api_token
     if expected is None:
-        return True
-    if not presented:
-        return False
-    return hmac.compare_digest(presented.strip(), expected)
+        # Auth disabled: accept whatever the client offered (or nothing).
+        return True, offered[0] if offered else None
+    for proto in offered:
+        if proto.startswith(_WS_BEARER_PREFIX):
+            presented = proto[len(_WS_BEARER_PREFIX) :]
+            if hmac.compare_digest(presented, expected):
+                # Echo the matched protocol so the browser's WebSocket
+                # handshake succeeds (RFC 6455: server SHOULD select one of
+                # the offered subprotocols when responding).
+                return True, proto
+    return False, None
 
 
 class IntentRequest(BaseModel):
@@ -548,15 +564,20 @@ async def video_stream(
 
 
 @app.websocket("/ws")
-async def ws_endpoint(ws: WebSocket, token: str | None = Query(default=None)) -> None:
-    if not _check_ws_token(token):
+async def ws_endpoint(ws: WebSocket) -> None:
+    offered_protocols = list(ws.scope.get("subprotocols", []))
+    accept, echo_protocol = _select_ws_subprotocol(offered_protocols)
+    if not accept:
         # Close before accept so unauthorized clients see a clean handshake
         # rejection instead of a brief "connected" flash. 4401 = app-defined
         # "unauthorized" close code.
         await ws.close(code=4401)
         return
 
-    await ws.accept()
+    if echo_protocol is None:
+        await ws.accept()
+    else:
+        await ws.accept(subprotocol=echo_protocol)
 
     ws_manager = _ws_manager
     broadcaster = _broadcaster

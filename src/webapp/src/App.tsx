@@ -422,6 +422,9 @@ export default function App(): JSX.Element {
   useEffect(() => {
     const wsClient = new ReconnectingWsClient({
       url: backendConfig.wsUrl,
+      subprotocols: backendConfig.apiToken
+        ? [`aot.bearer.${backendConfig.apiToken}`]
+        : undefined,
       onConnectionChange: (connected) => {
         dispatch({ type: "WS_CONNECTION_CHANGED", connected });
       },
@@ -440,7 +443,7 @@ export default function App(): JSX.Element {
         window.cancelAnimationFrame(frameIdRef.current);
       }
     };
-  }, [backendConfig.wsUrl, handleParsedEnvelope]);
+  }, [backendConfig.wsUrl, backendConfig.apiToken, handleParsedEnvelope]);
 
   useEffect(() => {
     const timerId = window.setInterval(() => {
