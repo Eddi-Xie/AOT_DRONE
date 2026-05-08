@@ -8,7 +8,7 @@ import numpy as np
 
 from .box_select import pick_best_box
 from .tracker import TrackerResult
-from .types import Detection, NormalizedBBox, PixelBBox, VisState, normalize_bbox_xywh
+from .types import Detection, NormalizedBBox, PixelBBox, VisState, clamp01, normalize_bbox_xywh
 
 
 class DetectorLike(Protocol):
@@ -52,11 +52,19 @@ class VisionPipelineConfig:
     # 0.95 means after ~14 tracker-only frames a detection conf=1.0
     # decays to ~0.5; after ~50 frames to ~0.08 (clamped at the floor).
     tracker_only_conf_decay: float = 0.95
-    # Lower bound for the decayed confidence so a long tracker-only stretch
-    # doesn't underrun past zero. UI consumers compare against this floor
-    # to decide how to render "tracker prediction stale". Configurable via
-    # the env var VISION_TRACKER_ONLY_CONF_FLOOR (read in main.py).
-    tracker_only_conf_floor: float = 0.3
+    # Lower bound for the decayed confidence on a tracker-only stretch.
+    # Cross-component contract: the FC's `trackingConfig_.minConfidence`
+    # (0.5 by default; src/fc/header/FlightController.h) gates whether the
+    # FC trusts the published bbox in `runFollowTargetLogic` — anything
+    # strictly below `minConfidence` causes the FC to drop into Searching
+    # / hover. So the vision floor MUST be >= FC minConfidence for normal
+    # tracker-only stretches to keep the FC engaged. Default 0.5 matches.
+    # Operators that want the FC to fall back to hover after long tracker-
+    # only stretches can lower this floor (e.g. to 0.3) — but they must
+    # also lower the FC's minConfidence in lock-step or the new behaviour
+    # is an in-flight surprise. Configurable via the env var
+    # VISION_TRACKER_ONLY_CONF_FLOOR (read in main.py).
+    tracker_only_conf_floor: float = 0.5
 
     def __post_init__(self) -> None:
         if self.detect_hold_n < 0:
@@ -201,9 +209,11 @@ class VisionPipeline:
             self._search_counter = 0
             self._tracker_active = bool(self.tracker.initialize(frame=frame, bbox=current.bbox))
             # Seed the tracking confidence from the detection that just got
-            # us here. Subsequent tracker-only frames will decay this value;
+            # us here. clamp01 guards against an out-of-contract detector
+            # (e.g. NaN, >1.0, or negative confidence) poisoning the decay
+            # state. Subsequent tracker-only frames will decay this value;
             # the next detection will re-seed it.
-            self._last_tracking_conf = float(current.confidence)
+            self._last_tracking_conf = clamp01(float(current.confidence))
             return _tracking_result(
                 bbox=current.bbox, img_w=img_w, img_h=img_h, conf=self._last_tracking_conf
             )
@@ -252,21 +262,27 @@ class VisionPipeline:
             # Detection frame: re-seed the published confidence from the
             # detector's own confidence (audit A9). The previous behaviour
             # was hardcoded conf=1.0 regardless of detector output, which
-            # masked uncertain detections from the UI sparkline.
-            self._last_tracking_conf = float(detected.confidence)
+            # masked uncertain detections from the UI sparkline. clamp01
+            # guards against out-of-contract detector outputs (NaN, >1.0,
+            # negative).
+            self._last_tracking_conf = clamp01(float(detected.confidence))
             return _tracking_result(
                 bbox=detected.bbox, img_w=img_w, img_h=img_h, conf=self._last_tracking_conf
             )
 
         if tracker_success and tracker_bbox is not None:
-            # Tracker-only frame: decay the cached conf toward the floor.
-            # The decay rate (0.95/frame default) means a high-conf detection
-            # remains "trustworthy" for ~14 tracker-only frames before
-            # dropping below 0.5 — long enough to ride out a typical
-            # detector miss-streak, short enough that a long tracker-only
-            # stretch surfaces in the UI as "stale".
+            # Tracker-only frame: decay the cached conf. The floor only
+            # applies when the seed was already at or above it — this
+            # prevents the floor from RAISING confidence on a stretch that
+            # started below the floor (e.g. operator lowered YOLO's
+            # conf_threshold below the floor and a low-conf detection
+            # seeded TRACKING). Below-floor seeds simply continue to decay
+            # toward zero with each tracker-only frame.
             decayed = self._last_tracking_conf * self.config.tracker_only_conf_decay
-            self._last_tracking_conf = max(decayed, self.config.tracker_only_conf_floor)
+            if self._last_tracking_conf >= self.config.tracker_only_conf_floor:
+                self._last_tracking_conf = max(decayed, self.config.tracker_only_conf_floor)
+            else:
+                self._last_tracking_conf = decayed
             return _tracking_result(
                 bbox=tracker_bbox, img_w=img_w, img_h=img_h, conf=self._last_tracking_conf
             )

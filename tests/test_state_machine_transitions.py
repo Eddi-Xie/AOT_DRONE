@@ -417,6 +417,72 @@ def test_tracker_only_confidence_clamps_at_floor() -> None:
     assert last_conf == 0.3
 
 
+def test_low_seed_conf_decays_freely_below_floor() -> None:
+    """Floor must not RAISE conf above the seed when the seed itself was
+    below the floor. Operator scenario: YOLO conf_threshold lowered below
+    the configured floor so a low-conf detection seeds TRACKING. The floor
+    only applies as a clamp on stretches that started healthy."""
+    detector = _SequenceDetector(
+        by_frame=(
+            (_det(100.0, 100.0, 80.0, 80.0, conf=0.4),),  # frame 1: TARGET_DETECTED
+            (
+                _det(100.0, 100.0, 80.0, 80.0, conf=0.4),
+            ),  # frame 2: TRACKING (seed=0.4, below floor)
+            (),  # frame 3: tracker-only — must continue decaying, not clamp up to floor=0.5
+            (),  # frame 4: same
+        )
+    )
+    tracker = _CountingTracker(update_result=(True, PixelBBox(x=99.0, y=99.0, w=80.0, h=80.0)))
+    pipeline = VisionPipeline(
+        detector=detector,
+        tracker=tracker,
+        config=VisionPipelineConfig(
+            detect_hold_n=1,
+            search_n=10,
+            detect_every_n=1,
+            tracker_only_conf_decay=0.5,
+            tracker_only_conf_floor=0.5,  # higher than the seed (0.4)
+        ),
+    )
+
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    pipeline.process_frame(frame=frame, frame_id=1)
+    pipeline.process_frame(frame=frame, frame_id=2)  # TRACKING entry, conf=0.4
+    r3 = pipeline.process_frame(frame=frame, frame_id=3)
+    r4 = pipeline.process_frame(frame=frame, frame_id=4)
+
+    # Pre-fix bug: floor would clamp 0.2 up to 0.5, RAISING conf above seed.
+    # Post-fix: seed (0.4) < floor (0.5), so decay continues unbounded.
+    assert r3.conf == 0.2  # 0.4 * 0.5
+    assert r4.conf == 0.1  # 0.2 * 0.5
+
+
+def test_out_of_contract_detector_conf_is_clamped() -> None:
+    """A buggy YOLO wrapper returning conf > 1.0 must not poison the decay
+    state. clamp01 at the seed sites caps the cached _last_tracking_conf
+    in [0, 1]."""
+    detector = _SequenceDetector(
+        by_frame=(
+            (_det(100.0, 100.0, 80.0, 80.0, conf=1.5),),  # frame 1: TARGET_DETECTED
+            (_det(100.0, 100.0, 80.0, 80.0, conf=1.5),),  # frame 2: TRACKING (clamps to 1.0)
+        )
+    )
+    tracker = _CountingTracker()
+    pipeline = VisionPipeline(
+        detector=detector,
+        tracker=tracker,
+        config=VisionPipelineConfig(detect_hold_n=1, search_n=2, detect_every_n=1),
+    )
+
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    pipeline.process_frame(frame=frame, frame_id=1)
+    result = pipeline.process_frame(frame=frame, frame_id=2)
+
+    # Detector said 1.5 — clamped to 1.0 in the published result and in
+    # the cached state.
+    assert result.conf == 1.0
+
+
 def test_tracking_prefers_detector_when_tracker_fails_same_frame() -> None:
     detector = _SequenceDetector(
         by_frame=(

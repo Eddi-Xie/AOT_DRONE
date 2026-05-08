@@ -312,11 +312,14 @@ def run_loop(
         tracker_impl = tracker or OpenCvTracker(config.tracker)
         # Tracker-only confidence decay knobs are env-driven so operators can
         # tune them without a code change. Defaults match VisionPipelineConfig
-        # (0.95 decay rate, 0.3 floor) — well-tested values from the audit
-        # rationale; override only if a deployment shows the UI sparkline
-        # behaving wrong at the edges.
+        # (0.95 decay rate, 0.5 floor) — the floor is intentionally aligned
+        # with the FC's `trackingConfig_.minConfidence` (0.5) so a normal
+        # tracker-only stretch never drops the FC out of TRACKING. Lowering
+        # the floor below 0.5 changes in-flight behaviour and must be done
+        # in lock-step with FC config — see VisionPipelineConfig docstring
+        # and src/fc/header/FlightController.h:54.
         decay_rate = float(os.environ.get("VISION_TRACKER_ONLY_CONF_DECAY", "0.95"))
-        decay_floor = float(os.environ.get("VISION_TRACKER_ONLY_CONF_FLOOR", "0.3"))
+        decay_floor = float(os.environ.get("VISION_TRACKER_ONLY_CONF_FLOOR", "0.5"))
         detect_pipeline = VisionPipeline(
             detector=detector_impl,
             tracker=tracker_impl,
