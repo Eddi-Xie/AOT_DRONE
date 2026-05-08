@@ -38,6 +38,13 @@ class VisionPipelineConfig:
     # frame blip without delaying the genuine target-lost case beyond ~1
     # frame at the pipeline's detection rate.
     target_detected_grace_frames: int = 1
+    # In TRACKING state, re-initialise the KCF tracker only when the new
+    # detection's IoU against the most recent tracker estimate falls below
+    # this threshold. Above the threshold we trust the tracker's appearance
+    # model and skip the re-init. 0.5 strikes a balance: it accepts modest
+    # box drift (the detector is noisy too) but flips on a real identity
+    # swap or large position jump.
+    tracker_reinit_iou: float = 0.5
 
     def __post_init__(self) -> None:
         if self.detect_hold_n < 0:
@@ -52,6 +59,8 @@ class VisionPipelineConfig:
             raise ValueError("desired_cy must be in [0, 1]")
         if self.target_detected_grace_frames < 0:
             raise ValueError("target_detected_grace_frames must be >= 0")
+        if not (0.0 <= self.tracker_reinit_iou <= 1.0):
+            raise ValueError("tracker_reinit_iou must be in [0, 1]")
 
 
 class VisionPipeline:
@@ -74,6 +83,10 @@ class VisionPipeline:
         self._last_detection_frame: int | None = None
 
         self._tracker_active = False
+        # Cached most-recent tracker output (only valid while _tracker_active
+        # is True). Used for the IoU sanity check that gates re-init when a
+        # detection arrives while tracking — see _update_tracking.
+        self._last_tracker_bbox: PixelBBox | None = None
         # Counter for consecutive missed-detection frames in TARGET_DETECTED.
         # Reset on (a) entry to TARGET_DETECTED from another state and
         # (b) any successful detection while in TARGET_DETECTED. Compared
@@ -93,6 +106,7 @@ class VisionPipeline:
         self._last_detection = None
         self._last_detection_frame = None
         self._tracker_active = False
+        self._last_tracker_bbox = None
         self._target_detected_miss_streak = 0
         self.tracker.reset()
 
@@ -176,16 +190,38 @@ class VisionPipeline:
         img_h: int,
         detected: Detection | None,
     ) -> TrackerResult:
+        # When a detection arrives this frame we trust it as the authoritative
+        # signal and SKIP `tracker.update` (audit A12) — KCF's update is
+        # expensive and, when the tracker has drifted from the true target,
+        # can produce a misleading bbox we'd then have to discard. Use the
+        # most recent tracker bbox cached from a previous frame for the IoU
+        # sanity check below (audit A3).
         tracker_success = False
         tracker_bbox: PixelBBox | None = None
-
-        if self._tracker_active:
+        if self._tracker_active and detected is None:
             tracker_success, tracker_bbox = self.tracker.update(frame)
-            if not tracker_success:
+            if tracker_success and tracker_bbox is not None:
+                self._last_tracker_bbox = tracker_bbox
+            else:
                 self._tracker_active = False
 
         if detected is not None:
-            self._tracker_active = bool(self.tracker.initialize(frame=frame, bbox=detected.bbox))
+            # Audit A3: re-init the tracker only when its prior estimate has
+            # diverged from the detection (low IoU, or tracker not active /
+            # no prior estimate). Re-init on every detection — the previous
+            # behaviour — destroys the appearance model the tracker has
+            # built up across frames and trades long-term stability for a
+            # one-frame correction.
+            should_reinit = (
+                not self._tracker_active
+                or self._last_tracker_bbox is None
+                or _iou(self._last_tracker_bbox, detected.bbox) < self.config.tracker_reinit_iou
+            )
+            if should_reinit:
+                self._tracker_active = bool(
+                    self.tracker.initialize(frame=frame, bbox=detected.bbox)
+                )
+                self._last_tracker_bbox = detected.bbox if self._tracker_active else None
             return _tracking_result(bbox=detected.bbox, img_w=img_w, img_h=img_h)
 
         if tracker_success and tracker_bbox is not None:
@@ -195,6 +231,7 @@ class VisionPipeline:
         self._search_counter = 0
         self._detected_hold_counter = 0
         self._detected_box = None
+        self._last_tracker_bbox = None
         self.tracker.reset()
         self._tracker_active = False
         return _zero_result(VisState.SEARCHING)
@@ -223,6 +260,7 @@ class VisionPipeline:
         self._target_detected_miss_streak = 0
         self.tracker.reset()
         self._tracker_active = False
+        self._last_tracker_bbox = None
 
     def _should_detect(self, frame_id: int) -> bool:
         return ((max(1, frame_id) - 1) % self.config.detect_every_n) == 0
@@ -283,3 +321,30 @@ def _zero_result(state: VisState) -> TrackerResult:
         conf=0.0,
         track_id=0,
     )
+
+
+def _iou(a: PixelBBox, b: PixelBBox) -> float:
+    """Intersection-over-Union for two pixel-space (x, y, w, h) boxes.
+
+    Returns 0.0 for non-overlapping boxes or zero-area inputs (rather than
+    NaN), so callers can do plain `<` comparisons against a threshold.
+    """
+    if a.w <= 0.0 or a.h <= 0.0 or b.w <= 0.0 or b.h <= 0.0:
+        return 0.0
+    a_x2 = a.x + a.w
+    a_y2 = a.y + a.h
+    b_x2 = b.x + b.w
+    b_y2 = b.y + b.h
+    inter_x1 = max(a.x, b.x)
+    inter_y1 = max(a.y, b.y)
+    inter_x2 = min(a_x2, b_x2)
+    inter_y2 = min(a_y2, b_y2)
+    inter_w = inter_x2 - inter_x1
+    inter_h = inter_y2 - inter_y1
+    if inter_w <= 0.0 or inter_h <= 0.0:
+        return 0.0
+    inter_area = inter_w * inter_h
+    union_area = (a.w * a.h) + (b.w * b.h) - inter_area
+    if union_area <= 0.0:
+        return 0.0
+    return inter_area / union_area
