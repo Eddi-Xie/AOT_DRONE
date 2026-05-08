@@ -345,6 +345,16 @@ function formatError(error: unknown): string {
   return "Request failed.";
 }
 
+// Heartbeat watchdog cadence: 2x the publisher cadence + 0.5 s slack, in ms.
+// Returns null when vis_fresh_s is missing or non-positive (caller should
+// keep the previous value).
+function heartbeatMsFromVisFresh(visFreshS: number | null): number | null {
+  if (visFreshS === null || visFreshS <= 0) {
+    return null;
+  }
+  return (2 * visFreshS + 0.5) * 1000;
+}
+
 export default function App(): JSX.Element {
   const backendConfig = useMemo(() => getBackendConfig(), []);
   const overlaySource = backendConfig.overlaySource;
@@ -460,6 +470,17 @@ export default function App(): JSX.Element {
   );
 
   const wsClientRef = useRef<ReconnectingWsClient | null>(null);
+  // Pin the parsed-envelope handler behind a ref so the WS effect can have a
+  // stable identity in its callback without rebuilding the socket every time
+  // overlaySource (a dep of handleParsedEnvelope) changes.
+  const handleParsedEnvelopeRef = useRef(handleParsedEnvelope);
+  handleParsedEnvelopeRef.current = handleParsedEnvelope;
+  // Same trick for the watchdog cadence: the WS effect only runs on
+  // wsUrl/apiToken changes, but we want the latest learned vis_fresh_s
+  // applied to the new client immediately on construction.
+  const visFreshFromLink = readNumber(state.linkStatus?.vis_fresh_s);
+  const visFreshRef = useRef<number | null>(visFreshFromLink);
+  visFreshRef.current = visFreshFromLink;
 
   useEffect(() => {
     const wsClient = new ReconnectingWsClient({
@@ -474,13 +495,22 @@ export default function App(): JSX.Element {
         }
       },
       onEnvelope: (envelope) => {
-        handleParsedEnvelope(envelope);
+        handleParsedEnvelopeRef.current(envelope);
       },
       onTransportEvent: (event) => {
         dispatch({ type: "WS_TRANSPORT_ERROR", consecutiveErrors: event.consecutiveErrors });
       },
       minBackoffMs: 500,
     });
+
+    // If we previously learned the cadence (e.g. wsUrl just changed and a new
+    // client is being constructed) re-apply it immediately so the new socket
+    // does not sit on the conservative 1000 ms default until the next
+    // LINK_STATUS frame arrives.
+    const seededHeartbeat = heartbeatMsFromVisFresh(visFreshRef.current);
+    if (seededHeartbeat !== null) {
+      wsClient.setHeartbeatTimeoutMs(seededHeartbeat);
+    }
 
     wsClientRef.current = wsClient;
     wsClient.start();
@@ -492,17 +522,19 @@ export default function App(): JSX.Element {
         window.cancelAnimationFrame(frameIdRef.current);
       }
     };
-  }, [backendConfig.wsUrl, backendConfig.apiToken, handleParsedEnvelope]);
+  }, [backendConfig.wsUrl, backendConfig.apiToken]);
 
   // Track vision-stream cadence: heartbeat = 2 * vis_fresh_s + 0.5 s. If we
   // don't see ANY frame for that long the socket is silently broken; force
   // a close so the reconnect path fires.
-  const visFreshFromLink = readNumber(state.linkStatus?.vis_fresh_s);
   useEffect(() => {
-    if (wsClientRef.current === null || visFreshFromLink === null || visFreshFromLink <= 0) {
+    if (wsClientRef.current === null) {
       return;
     }
-    const heartbeatMs = (2 * visFreshFromLink + 0.5) * 1000;
+    const heartbeatMs = heartbeatMsFromVisFresh(visFreshFromLink);
+    if (heartbeatMs === null) {
+      return;
+    }
     wsClientRef.current.setHeartbeatTimeoutMs(heartbeatMs);
   }, [visFreshFromLink]);
 
@@ -810,6 +842,7 @@ export default function App(): JSX.Element {
               nowMs={nowMs}
               linkUpdatedAtMs={state.linkUpdatedAtMs}
               linkEnvelopeTimestampS={state.linkEnvelopeTimestampS}
+              projectedVisAgeS={projectedVisAgeS}
             />
           </ErrorBoundary>
         </div>

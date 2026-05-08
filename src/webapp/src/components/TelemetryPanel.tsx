@@ -17,6 +17,11 @@ interface TelemetryPanelProps {
   nowMs: number;
   linkUpdatedAtMs: number | null;
   linkEnvelopeTimestampS: number | null;
+  // Pre-projected vis_age (snapshot age + elapsed since LINK_STATUS arrival),
+  // hoisted from App so the value is computed once per render rather than
+  // recomputed in three places (App-level alerts, this body, the
+  // buildVisionRows helper).
+  projectedVisAgeS: number | null;
 }
 
 function buildFcRows(
@@ -59,14 +64,12 @@ function buildFcRows(
 
 function buildVisionRows(
   linkStatus: LinkStatus | null,
-  nowMs: number,
-  linkUpdatedAtMs: number | null,
+  visAgeS: number | null,
 ): StatusRow[] {
   if (linkStatus === null) {
     return [];
   }
 
-  const visAgeS = projectAge(readNumber(linkStatus.vis_age_s), linkUpdatedAtMs, nowMs);
   const drops = [
     `o:${linkStatus.vis_drop_reason_oversize}`,
     `j:${linkStatus.vis_drop_reason_json}`,
@@ -228,14 +231,12 @@ export default function TelemetryPanel({
   nowMs,
   linkUpdatedAtMs,
   linkEnvelopeTimestampS,
+  projectedVisAgeS,
 }: TelemetryPanelProps): JSX.Element {
-  // Use the wall-clock-projected vis_age (snapshot age + elapsed since
-  // LINK_STATUS arrived) so the accent reflects current freshness. The raw
-  // snapshot value goes stale between LINK_STATUS frames and would let the
-  // accent stay green even after the stream had clearly died.
-  const projectedVisAgeS = linkStatus
-    ? projectAge(readNumber(linkStatus.vis_age_s), linkUpdatedAtMs, nowMs)
-    : null;
+  // Accent uses the App-projected vis_age so it tracks current freshness
+  // (rather than the snapshot value at LINK_STATUS arrival, which goes stale
+  // between frames and would let the accent stay green after the stream
+  // died).
   const visFreshThresholdS = linkStatus ? readNumber(linkStatus.vis_fresh_s) : null;
   const visAccent =
     projectedVisAgeS !== null &&
@@ -257,7 +258,7 @@ export default function TelemetryPanel({
 
         <StatusCard
           title="Vision Link"
-          rows={buildVisionRows(linkStatus, nowMs, linkUpdatedAtMs)}
+          rows={buildVisionRows(linkStatus, projectedVisAgeS)}
           accent={visAccent}
         />
 

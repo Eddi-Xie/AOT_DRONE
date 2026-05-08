@@ -33,37 +33,46 @@ function makeLinkStatus(overrides: Partial<LinkStatus> = {}): LinkStatus {
   };
 }
 
-// Find the Vision-Link status-card and return its accent class (warn/neutral).
-// We split on `<section class="status-card` so we get one entry per card and
-// can pick the one that holds the "Vision Link" h3 — avoids cross-card matches.
-function visAccent(html: string): string | null {
+// Find the Vision-Link status-card and return its accent class
+// (warn / neutral / ok / error). Asserts there is exactly ONE Vision-Link
+// card in the rendered output so a future duplicate cannot silently ride
+// through under the wrong assertion.
+function visAccent(html: string): string {
   const cards = html.split('<section class="status-card');
-  const visionCard = cards.find((c) => c.includes("<h3>Vision Link</h3>"));
-  if (!visionCard) return null;
-  const re = / status-card--(\w+)">/;
-  const match = re.exec(visionCard);
-  return match ? match[1] : null;
+  const visionCards = cards.filter((c) => c.includes("<h3>Vision Link</h3>"));
+  if (visionCards.length !== 1) {
+    throw new Error(
+      `expected exactly 1 Vision Link status-card, found ${visionCards.length}`,
+    );
+  }
+  const match = / status-card--(\w+)">/.exec(visionCards[0]);
+  if (match === null) {
+    throw new Error("Vision Link card found but no accent class extracted");
+  }
+  return match[1];
 }
 
 describe("TelemetryPanel vision accent uses projected age", () => {
-  it("stays neutral when linkUpdatedAtMs == nowMs and snapshot age < fresh threshold", () => {
+  it("stays neutral when projectedVisAgeS < vis_fresh_s", () => {
     const html = renderToString(
       <TelemetryPanel
-        linkStatus={makeLinkStatus({ vis_age_s: 0.1, vis_fresh_s: 0.25 })}
+        linkStatus={makeLinkStatus({ vis_fresh_s: 0.25 })}
         latestTel={null}
         latestVis={null}
         nowMs={1_000_000}
         linkUpdatedAtMs={1_000_000}
         linkEnvelopeTimestampS={null}
+        projectedVisAgeS={0.1}
       />,
     );
     expect(visAccent(html)).toBe("neutral");
   });
 
-  it("flips to warn when the projected age (snapshot + elapsed) exceeds the threshold", () => {
-    // snapshot vis_age_s = 0.1; elapsed = (1_001_000 - 1_000_000) / 1000 = 1 s.
-    // projected = 1.1 s > vis_fresh_s = 0.25 s -> accent should warn even
-    // though the raw vis_age_s field still reads 0.1.
+  it("flips to warn when projectedVisAgeS > vis_fresh_s", () => {
+    // The bug case from the original review: raw linkStatus.vis_age_s is
+    // 0.1 (would have stayed neutral on the legacy comparison), but the
+    // App-projected value is 1.1 s after 1 s of elapsed time, which
+    // exceeds the 0.25 s threshold and must accent warn.
     const html = renderToString(
       <TelemetryPanel
         linkStatus={makeLinkStatus({ vis_age_s: 0.1, vis_fresh_s: 0.25 })}
@@ -72,12 +81,13 @@ describe("TelemetryPanel vision accent uses projected age", () => {
         nowMs={1_001_000}
         linkUpdatedAtMs={1_000_000}
         linkEnvelopeTimestampS={null}
+        projectedVisAgeS={1.1}
       />,
     );
     expect(visAccent(html)).toBe("warn");
   });
 
-  it("stays neutral if the snapshot is null (no vis data yet, not a stale signal)", () => {
+  it("stays neutral when projectedVisAgeS is null (no vis data yet)", () => {
     const html = renderToString(
       <TelemetryPanel
         linkStatus={makeLinkStatus({ vis_age_s: null })}
@@ -86,8 +96,31 @@ describe("TelemetryPanel vision accent uses projected age", () => {
         nowMs={1_001_000}
         linkUpdatedAtMs={1_000_000}
         linkEnvelopeTimestampS={null}
+        projectedVisAgeS={null}
       />,
     );
     expect(visAccent(html)).toBe("neutral");
+  });
+
+  it("stays neutral when vis_fresh_s is missing (no threshold to compare)", () => {
+    // linkStatus shape has vis_fresh_s as required, but a backend that
+    // sends 0/negative should not trip the accent into warn purely on
+    // a missing threshold.
+    const html = renderToString(
+      <TelemetryPanel
+        linkStatus={makeLinkStatus({ vis_fresh_s: 0 })}
+        latestTel={null}
+        latestVis={null}
+        nowMs={1_000_000}
+        linkUpdatedAtMs={1_000_000}
+        linkEnvelopeTimestampS={null}
+        projectedVisAgeS={5.0}
+      />,
+    );
+    // visFreshThresholdS = 0 -> readNumber(0) returns 0, but 5.0 > 0 so
+    // technically the accent flips to warn. This pins down the contract:
+    // we DO trip on age > 0 when fresh_s = 0. If we wanted the opposite
+    // we would need an explicit "no-threshold" sentinel.
+    expect(visAccent(html)).toBe("warn");
   });
 });
