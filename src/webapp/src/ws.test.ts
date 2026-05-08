@@ -71,6 +71,71 @@ describe("parseWsEnvelope", () => {
   it("rejects unknown events", () => {
     expect(parseWsEnvelope({ event: "WAT", data: {}, timestamp_s: 0, seq: 0 })).toBeNull();
   });
+
+  it("rejects non-record input (null, string, array)", () => {
+    expect(parseWsEnvelope(null)).toBeNull();
+    expect(parseWsEnvelope("not-an-object")).toBeNull();
+    expect(parseWsEnvelope([])).toBeNull();
+  });
+
+  it("rejects when data is not a record", () => {
+    expect(
+      parseWsEnvelope({ event: "TEL_UPDATE", data: "x", timestamp_s: 0, seq: 0 }),
+    ).toBeNull();
+    expect(
+      parseWsEnvelope({ event: "TEL_UPDATE", data: null, timestamp_s: 0, seq: 0 }),
+    ).toBeNull();
+  });
+
+  it("rejects non-finite timestamp_s", () => {
+    expect(
+      parseWsEnvelope({ event: "TEL_UPDATE", data: {}, timestamp_s: Number.NaN, seq: 0 }),
+    ).toBeNull();
+    expect(
+      parseWsEnvelope({
+        event: "TEL_UPDATE",
+        data: {},
+        timestamp_s: Number.POSITIVE_INFINITY,
+        seq: 0,
+      }),
+    ).toBeNull();
+  });
+
+  it("rejects non-integer / negative / non-number seq", () => {
+    expect(
+      parseWsEnvelope({ event: "TEL_UPDATE", data: {}, timestamp_s: 0, seq: 7.5 }),
+    ).toBeNull();
+    expect(
+      parseWsEnvelope({ event: "TEL_UPDATE", data: {}, timestamp_s: 0, seq: -1 }),
+    ).toBeNull();
+    expect(
+      parseWsEnvelope({ event: "TEL_UPDATE", data: {}, timestamp_s: 0, seq: "7" }),
+    ).toBeNull();
+    expect(
+      parseWsEnvelope({ event: "TEL_UPDATE", data: {}, timestamp_s: 0, seq: Number.NaN }),
+    ).toBeNull();
+  });
+
+  it("ws_ver of wrong type is silently dropped (forward-compat)", () => {
+    const numeric = parseWsEnvelope({
+      event: "WARNING",
+      data: {},
+      timestamp_s: 0,
+      seq: 0,
+      ws_ver: 2,
+    });
+    expect(numeric?.ws_ver).toBe(2);
+
+    const stringy = parseWsEnvelope({
+      event: "WARNING",
+      data: {},
+      timestamp_s: 0,
+      seq: 0,
+      ws_ver: "1",
+    });
+    expect(stringy).not.toBeNull();
+    expect(stringy?.ws_ver).toBeUndefined();
+  });
 });
 
 describe("ReconnectingWsClient — transport-error reporting", () => {
@@ -123,6 +188,32 @@ describe("ReconnectingWsClient — transport-error reporting", () => {
     client.stop();
   });
 
+  it("onerror followed by abnormal onclose increments counter only ONCE (no double-count)", () => {
+    // Regression test: previously onerror bumped the counter AND triggered
+    // close(), then onclose with code 1006 bumped again — so a single real
+    // failure produced two transport events and tripped the 3x alert at
+    // ~2 actual failures. Fix: errorAlreadyCounted flag.
+    const events: WsTransportEvent[] = [];
+    const client = new ReconnectingWsClient({
+      url: "ws://test",
+      onEnvelope: () => {},
+      onConnectionChange: () => {},
+      onTransportEvent: (e) => events.push(e),
+      rng: () => 0.5,
+    });
+    client.start();
+    const inst = lastInstance();
+
+    inst.onerror?.(new Event("error"));
+    inst.onclose?.({ code: 1006 } as CloseEvent);
+
+    expect(events).toHaveLength(1);
+    expect(events[0].kind).toBe("error");
+    expect(events[0].consecutiveErrors).toBe(1);
+
+    client.stop();
+  });
+
   it("does NOT emit on a clean close (code 1000)", () => {
     const events: WsTransportEvent[] = [];
     const client = new ReconnectingWsClient({
@@ -137,6 +228,29 @@ describe("ReconnectingWsClient — transport-error reporting", () => {
     inst.onclose?.({ code: 1000 } as CloseEvent);
     expect(events).toEqual([]);
     client.stop();
+  });
+
+  it("intentional stop() does NOT emit a phantom abnormal-close event", () => {
+    // Regression test: previously stop() called ws.close() with no args,
+    // and the resulting onclose with code 1005 fired an abnormal-close
+    // transport event + console.error on every webapp unmount.
+    const events: WsTransportEvent[] = [];
+    const client = new ReconnectingWsClient({
+      url: "ws://test",
+      onEnvelope: () => {},
+      onConnectionChange: () => {},
+      onTransportEvent: (e) => events.push(e),
+      rng: () => 0.5,
+    });
+    client.start();
+    const inst = lastInstance();
+    inst.onopen?.(new Event("open"));
+
+    client.stop();
+    // Even if a delayed onclose fires after stop(), it must not emit.
+    inst.onclose?.({ code: 1005 } as CloseEvent);
+
+    expect(events).toEqual([]);
   });
 
   it("resets the consecutive-error counter on the next onopen", () => {
@@ -400,5 +514,132 @@ describe("ReconnectingWsClient — backoff jitter + ceiling", () => {
     expect(calls[calls.length - 1][1]).toBe(1000);
 
     client.stop();
+  });
+});
+
+describe("ReconnectingWsClient — lifecycle interactions", () => {
+  it("stop() during a pending reconnect cancels the reconnect timer", () => {
+    const client = new ReconnectingWsClient({
+      url: "ws://test",
+      onEnvelope: () => {},
+      onConnectionChange: () => {},
+      rng: () => 0.5,
+    });
+    client.start();
+
+    // Trigger a reconnect cycle and verify a timer is pending.
+    lastInstance().onclose?.(new Event("close") as CloseEvent);
+    expect(vi.getTimerCount()).toBeGreaterThan(0);
+
+    const initialInstanceCount = fakeInstances.length;
+    client.stop();
+    expect(vi.getTimerCount()).toBe(0);
+
+    // Advancing past the original reconnect delay must NOT construct a
+    // new socket — the dead client should stay dead.
+    vi.advanceTimersByTime(60_000);
+    expect(fakeInstances.length).toBe(initialInstanceCount);
+  });
+
+  it("late onmessage after stop() does not re-arm a heartbeat timer", () => {
+    // Pre-fix: a frame buffered between stop() and the matching onclose
+    // ran the original onmessage closure, called armHeartbeat, and left
+    // a stray setTimeout that fired long after teardown.
+    const client = new ReconnectingWsClient({
+      url: "ws://test",
+      onEnvelope: () => {},
+      onConnectionChange: () => {},
+      heartbeatTimeoutMs: 500,
+      rng: () => 0.5,
+    });
+    client.start();
+    const inst = lastInstance();
+    inst.onopen?.(new Event("open"));
+
+    client.stop();
+    expect(vi.getTimerCount()).toBe(0);
+
+    // Even though stop() nulls listeners, simulate a stale callback by
+    // invoking the original handler directly (defense-in-depth gate
+    // exists on the active flag too).
+    inst.onmessage?.({ data: '{"event":"WARNING","data":{},"timestamp_s":0,"seq":0}' } as MessageEvent);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("heartbeat fires close() and onclose schedules exactly one reconnect", () => {
+    // Heartbeat-then-reconnect transition: the watchdog calls close(),
+    // onclose runs (clearHeartbeatTimer is a no-op since the timer
+    // already fired), then scheduleReconnect arms a single fresh timer.
+    const client = new ReconnectingWsClient({
+      url: "ws://test",
+      onEnvelope: () => {},
+      onConnectionChange: () => {},
+      heartbeatTimeoutMs: 500,
+      minBackoffMs: 1000,
+      rng: () => 0.5,
+    });
+    client.start();
+    const inst = lastInstance();
+    inst.onopen?.(new Event("open"));
+
+    // Advance past the watchdog timeout — the heartbeat fires and calls
+    // ws.close(); that doesn't auto-fire onclose in our fake, so simulate
+    // it manually as the browser would.
+    vi.advanceTimersByTime(501);
+    expect(inst.close).toHaveBeenCalledTimes(1);
+    inst.onclose?.({ code: 1006 } as CloseEvent);
+
+    // Exactly one timer pending (the reconnect timer).
+    expect(vi.getTimerCount()).toBe(1);
+
+    // Advance past the reconnect delay; a new FakeWebSocket should be
+    // constructed exactly once.
+    const beforeReconnect = fakeInstances.length;
+    vi.runOnlyPendingTimers();
+    expect(fakeInstances.length).toBe(beforeReconnect + 1);
+
+    client.stop();
+  });
+
+  it("onerror clears the heartbeat timer so it can't re-call close() on a failing socket", () => {
+    const client = new ReconnectingWsClient({
+      url: "ws://test",
+      onEnvelope: () => {},
+      onConnectionChange: () => {},
+      heartbeatTimeoutMs: 500,
+      rng: () => 0.5,
+    });
+    client.start();
+    const inst = lastInstance();
+    inst.onopen?.(new Event("open"));
+    expect(vi.getTimerCount()).toBe(1); // heartbeat armed
+
+    inst.onerror?.(new Event("error"));
+    // Heartbeat timer is now cleared; only no timers remain (the close()
+    // call is synchronous and does not arm anything new).
+    expect(vi.getTimerCount()).toBe(0);
+
+    client.stop();
+  });
+
+  it("setHeartbeatTimeoutMs after stop() does not arm a stray timer", () => {
+    const client = new ReconnectingWsClient({
+      url: "ws://test",
+      onEnvelope: () => {},
+      onConnectionChange: () => {},
+      heartbeatTimeoutMs: 500,
+      rng: () => 0.5,
+    });
+    client.start();
+    lastInstance().onopen?.(new Event("open"));
+
+    client.stop();
+    expect(vi.getTimerCount()).toBe(0);
+
+    client.setHeartbeatTimeoutMs(100);
+    expect(vi.getTimerCount()).toBe(0);
+
+    vi.advanceTimersByTime(60_000);
+    expect(fakeInstances.length).toBe(1); // no new socket constructed
   });
 });

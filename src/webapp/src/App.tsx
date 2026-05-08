@@ -38,7 +38,7 @@ const DERIVED_WARNING_HOLD_MS = 1500;
 const DEFAULT_VIS_FRESH_S = 0.25;
 const DEFAULT_TEL_FRESH_S = 0.5;
 
-interface AppState {
+export interface AppState {
   wsConnected: boolean;
   lastWsMessageAtMs: number | null;
   linkStatus: LinkStatus | null;
@@ -58,7 +58,7 @@ interface AppState {
   wsConsecutiveErrors: number;
 }
 
-interface PendingStreamBatch {
+export interface PendingStreamBatch {
   linkStatus?: LinkStatus;
   linkUpdatedAtMs?: number;
   linkEnvelopeTimestampS?: number;
@@ -96,7 +96,7 @@ function areStatusAlertsEqual(a: readonly StatusAlert[], b: readonly StatusAlert
   return true;
 }
 
-type AppAction =
+export type AppAction =
   | { type: "WS_CONNECTION_CHANGED"; connected: boolean }
   | {
       type: "STREAM_BATCH";
@@ -120,7 +120,7 @@ type AppAction =
       message: string;
     };
 
-const INITIAL_STATE: AppState = {
+export const INITIAL_STATE: AppState = {
   wsConnected: false,
   lastWsMessageAtMs: null,
   linkStatus: null,
@@ -228,7 +228,7 @@ function selectTrackingData(
   };
 }
 
-function reducer(state: AppState, action: AppAction): AppState {
+export function reducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case "WS_CONNECTION_CHANGED":
       return {

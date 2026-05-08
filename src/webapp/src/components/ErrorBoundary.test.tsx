@@ -78,4 +78,25 @@ describe("ErrorBoundary", () => {
       spy.mockRestore();
     }
   });
+
+  it("private handleReset clears state.error so the wrapped subtree can re-mount", () => {
+    // We don't have RTL or jsdom; simulate the reset path by calling the
+    // boundary instance method directly. Pre-load state.error, invoke
+    // setState's effective behaviour by reaching into the instance.
+    const boundary = new ErrorBoundary({ sectionLabel: "Foo", children: null });
+    boundary.state = { error: new Error("primed") };
+    // setState is normally sync-batched by React, but we own the instance
+    // here so emulate it. The handler is private; access via `as any` for
+    // the test only.
+    const setStateCalls: Array<{ error: Error | null }> = [];
+    boundary.setState = ((updater: { error: Error | null }) => {
+      setStateCalls.push(updater);
+    }) as unknown as typeof boundary.setState;
+
+    // Drive the private handler.
+    (boundary as unknown as { handleReset: () => void }).handleReset();
+
+    expect(setStateCalls).toHaveLength(1);
+    expect(setStateCalls[0]).toEqual({ error: null });
+  });
 });

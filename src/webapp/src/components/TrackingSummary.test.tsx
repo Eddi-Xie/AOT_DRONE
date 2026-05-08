@@ -5,12 +5,13 @@ import TrackingSummary from "./TrackingSummary";
 interface RenderArgs {
   ageHistory: number[];
   freshThresholdS: number;
+  overlaySource?: "VIS" | "TEL";
 }
 
-function render({ ageHistory, freshThresholdS }: RenderArgs): string {
+function render({ ageHistory, freshThresholdS, overlaySource = "VIS" }: RenderArgs): string {
   return renderToString(
     <TrackingSummary
-      overlaySource="VIS"
+      overlaySource={overlaySource}
       trackingState={3}
       trackingBlockedReason={null}
       confidence={0.9}
@@ -26,67 +27,74 @@ function render({ ageHistory, freshThresholdS }: RenderArgs): string {
   );
 }
 
-// Pull the polyline points attr for a given sparkline label out of the SSR
-// output. Returns null if the polyline isn't present.
-function pointsFor(html: string, ariaLabel: string): string | null {
-  // Find the svg with this aria-label, then the inner polyline that's NOT the
-  // baseline (which uses class sparkline__baseline).
-  const svgRe = new RegExp(
-    `aria-label="${ariaLabel}"[^>]*>([\\s\\S]*?)</svg>`,
-  );
+// Parse the polyline points string into [x, y] pairs of numbers. Far less
+// fragile than substring matching: changes in coord precision or ordering
+// won't silently make assertions pass. Throws if the polyline is missing.
+function ageSparklineYs(html: string): number[] {
+  const svgRe = new RegExp('aria-label="Age history sparkline"[^>]*>([\\s\\S]*?)</svg>');
   const svgMatch = svgRe.exec(html);
-  if (!svgMatch) return null;
-  const inner = svgMatch[1];
+  if (!svgMatch) throw new Error("Age history sparkline svg not found in render");
   const lineRe = /class="sparkline__line"[^>]*points="([^"]+)"/;
-  const lineMatch = lineRe.exec(inner);
-  return lineMatch ? lineMatch[1] : null;
+  const lineMatch = lineRe.exec(svgMatch[1]);
+  if (!lineMatch) throw new Error("Age history sparkline polyline not found");
+  return lineMatch[1]
+    .trim()
+    .split(/\s+/)
+    .map((pair) => {
+      const [x, y] = pair.split(",").map(Number);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) {
+        throw new Error(`bad point pair: ${pair}`);
+      }
+      return y;
+    });
 }
 
 describe("TrackingSummary age sparkline scaling", () => {
-  it("uses freshThresholdS * 4 as the y-axis ceiling for the age history", () => {
-    // freshThresholdS = 0.25 → ceiling = 1.0. A value of 1.0 should sit at
-    // y=0 (top of sparkline); a value of 0.25 should sit at y = height *
-    // 0.75 (one-quarter up).
-    const html = render({
-      ageHistory: [0, 0.25, 1.0],
-      freshThresholdS: 0.25,
-    });
-    const points = pointsFor(html, "Age history sparkline");
-    expect(points).not.toBeNull();
-    // Sparkline height = 52; ceiling = 1.0 (= 0.25 * 4).
-    // y for value=0:    52 - 0/1 * 52 = 52
-    // y for value=0.25: 52 - 0.25/1 * 52 = 39
-    // y for value=1.0:  52 - 1.0/1 * 52 = 0
-    expect(points).toContain("52.00");
-    expect(points).toContain("39.00");
-    expect(points).toContain("0.00");
+  it("uses ageThreshold * 4 as the y-axis ceiling for the age history", () => {
+    // freshThresholdS = 0.25 -> ceiling = 1.0. height = 52.
+    // y for value=0:    52 * (1 - 0/1) = 52
+    // y for value=0.25: 52 * (1 - 0.25/1) = 39
+    // y for value=1.0:  52 * (1 - 1/1) = 0
+    const ys = ageSparklineYs(
+      render({ ageHistory: [0, 0.25, 1.0], freshThresholdS: 0.25 }),
+    );
+    expect(ys).toEqual([52, 39, 0]);
   });
 
-  it("scales differently when freshThresholdS doubles", () => {
-    const htmlNarrow = render({
-      ageHistory: [0.5],
-      freshThresholdS: 0.25, // ceiling = 1.0 → 0.5 sits at y = 52 - 26 = 26.00
-    });
-    const htmlWide = render({
-      ageHistory: [0.5],
-      freshThresholdS: 0.5, // ceiling = 2.0 → 0.5 sits at y = 52 - 13 = 39.00
-    });
-    const narrow = pointsFor(htmlNarrow, "Age history sparkline");
-    const wide = pointsFor(htmlWide, "Age history sparkline");
-    expect(narrow).not.toBe(wide);
-    expect(narrow).toContain("26.00");
-    expect(wide).toContain("39.00");
+  it("scales by index — doubling freshThresholdS halves the y for fixed value", () => {
+    const narrowYs = ageSparklineYs(
+      render({ ageHistory: [0.5], freshThresholdS: 0.25 }),
+    );
+    const wideYs = ageSparklineYs(
+      render({ ageHistory: [0.5], freshThresholdS: 0.5 }),
+    );
+    // narrow: ceiling = 1.0 -> 0.5 -> y = 52 - 26 = 26
+    // wide:   ceiling = 2.0 -> 0.5 -> y = 52 - 13 = 39
+    expect(narrowYs).toEqual([26]);
+    expect(wideYs).toEqual([39]);
   });
 
-  it("substitutes the per-overlay default when freshThresholdS<=0", () => {
-    // TrackingSummary substitutes a 0.25 default for VIS when
-    // freshThresholdS<=0 — the sparkline ceiling becomes 0.25 * 4 = 1.0.
-    const html = render({
-      ageHistory: [1.0],
-      freshThresholdS: 0,
-    });
-    const points = pointsFor(html, "Age history sparkline");
-    // value=1.0 at ceiling=1.0 -> normalized=1.0 -> y=0.
-    expect(points).toContain("0.00");
+  it("substitutes the per-overlay VIS default when freshThresholdS=0", () => {
+    // TrackingSummary substitutes 0.25 default for VIS — ceiling = 1.0.
+    const ys = ageSparklineYs(
+      render({ ageHistory: [1.0], freshThresholdS: 0, overlaySource: "VIS" }),
+    );
+    expect(ys).toEqual([0]);
+  });
+
+  it("substitutes the per-overlay TEL default (0.5) when freshThresholdS<=0", () => {
+    // TEL default = 0.5 -> ceiling = 2.0. value=1.0 -> y = 52 - 26 = 26.
+    const ys = ageSparklineYs(
+      render({ ageHistory: [1.0], freshThresholdS: 0, overlaySource: "TEL" }),
+    );
+    expect(ys).toEqual([26]);
+  });
+
+  it("handles negative freshThresholdS by falling back to per-overlay default", () => {
+    // Same code path as 0; pin the contract.
+    const ys = ageSparklineYs(
+      render({ ageHistory: [1.0], freshThresholdS: -0.5, overlaySource: "VIS" }),
+    );
+    expect(ys).toEqual([0]);
   });
 });
