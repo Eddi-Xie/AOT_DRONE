@@ -7,6 +7,7 @@ add_library(fc STATIC
     ${FC_IMPL_DIR}/CommandServer.cpp
     ${FC_IMPL_DIR}/TelemetryPublisher.cpp
     ${FC_IMPL_DIR}/FlightController.cpp
+    ${FC_IMPL_DIR}/RcSink.cpp
 )
 
 target_include_directories(fc PUBLIC ${FC_HEADER_DIR})
