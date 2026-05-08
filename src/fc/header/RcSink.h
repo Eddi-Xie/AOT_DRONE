@@ -26,6 +26,7 @@
 
 #include "FlightController.h" // BetaFlightCommand
 
+#include <cstdio>
 #include <string>
 
 namespace fc {
@@ -65,6 +66,41 @@ class NullSink final : public IRcSink {
   private:
     std::uint64_t calls_ = 0;
     bool first_logged_ = false;
+};
+
+// Append-only CSV log of every channel write. Used for offline analysis
+// of HIL bench runs and as the input to scripts/dev/replay_mission.py.
+//
+// Format: header `timestamp_s,roll,pitch,yaw,throttle,aux1,aux2,aux3,aux4`
+// followed by one row per writeChannels() call.
+//
+// File layout: <log_dir>/sink_<utc>.csv where <utc> is YYYYMMDDTHHMMSSZ
+// at construction time. Each call flushes via std::fflush so a SIGINT
+// crash mid-run does not lose tail data.
+class RecordingSink final : public IRcSink {
+  public:
+    // Opens <log_dir>/sink_<utc>.csv. log_dir is created if missing
+    // (mkdir -p). On failure, ok() returns false and writeChannels is
+    // a no-op so the FC main loop keeps ticking.
+    explicit RecordingSink(const std::string& log_dir);
+    ~RecordingSink() override;
+
+    // Non-copyable: owns a FILE*.
+    RecordingSink(const RecordingSink&) = delete;
+    RecordingSink& operator=(const RecordingSink&) = delete;
+
+    void writeChannels(const BetaFlightCommand& cmd, double timestamp_s) override;
+    bool ok() const override { return file_ != nullptr; }
+    std::string name() const override { return "recording"; }
+
+    // Test/diagnostic accessors.
+    const std::string& path() const { return path_; }
+    std::uint64_t rows_written() const { return rows_written_; }
+
+  private:
+    std::string path_;
+    std::FILE* file_ = nullptr;
+    std::uint64_t rows_written_ = 0;
 };
 
 } // namespace fc

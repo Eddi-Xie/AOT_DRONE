@@ -178,12 +178,24 @@ std::unique_ptr<fc::IRcSink> make_rc_sink_from_env() {
     if (sink_kind == "null") {
         return std::make_unique<fc::NullSink>();
     }
+    if (sink_kind == "recording") {
+        const char* dir_env = std::getenv("FC_RC_LOG_DIR");
+        const std::string log_dir =
+            (dir_env && *dir_env) ? std::string(dir_env) : std::string("logs/hil");
+        auto sink = std::make_unique<fc::RecordingSink>(log_dir);
+        if (!sink->ok()) {
+            std::cerr << "[FC] RecordingSink failed to open log file under '" << log_dir
+                      << "'. Refusing to start.\n";
+            return nullptr;
+        }
+        return sink;
+    }
     if (sink_kind == "msp") {
         std::cerr << "[FC] FC_RC_SINK=msp is reserved for S0.8 (USB MSP driver) and is not yet "
                      "implemented. Use 'null', 'recording', or 'fake' for now.\n";
         return nullptr;
     }
-    // 'recording' and 'fake' are added in follow-up commits in this branch.
+    // 'fake' is added in the next commit in this branch.
     std::cerr << "[FC] Unknown FC_RC_SINK='" << sink_kind
               << "'. Valid: null|recording|fake|msp. Falling back to 'null' is unsafe; refusing "
                  "to start.\n";
