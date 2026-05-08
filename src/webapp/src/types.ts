@@ -25,6 +25,8 @@ export interface WsEnvelope<TData = Record<string, unknown>> {
   seq: number;
 }
 
+// Closed-shape: same contract as TelUpdate / VisUpdate. Adding a field
+// requires both this declaration AND a guard in asLinkStatus below.
 export interface LinkStatus {
   fc_connected: boolean;
   fc_last_connect_attempt_s: number | null;
@@ -50,7 +52,6 @@ export interface LinkStatus {
   cmd_timeout_s: number;
   cmd_hz: number;
   tel_hz: number;
-  [key: string]: unknown;
 }
 
 // Closed-shape: only the listed fields are part of the contract. Removing
@@ -208,8 +209,9 @@ export function asLinkStatus(value: unknown): LinkStatus | null {
     return null;
   }
 
+  // Closed-shape: built explicitly, no `...value` spread. Wire-extra fields
+  // are dropped instead of flowing through unvalidated.
   return {
-    ...value,
     fc_connected: fcConnected,
     fc_last_connect_attempt_s: readNullableNumber(value.fc_last_connect_attempt_s),
     cmd_tx_total: readNumber(value.cmd_tx_total) ?? 0,
@@ -320,7 +322,13 @@ function validateFields(
     if (!result.ok) {
       return spec.key;
     }
-    out[spec.key] = result.value;
+    // Skip undefined writes — keeps `validated` clean of absent-field
+    // keys. The downstream parser still writes `out_field: validated.x`
+    // which materialises as undefined in the final TelUpdate, matching
+    // the wire-shape contract of optional `?:` fields.
+    if (result.value !== undefined) {
+      out[spec.key] = result.value;
+    }
   }
   return null;
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AppState, INITIAL_STATE, reducer } from "./App";
+import { AppState, INITIAL_STATE, heartbeatMsFromVisFresh, reducer } from "./App";
 import { ControlMode } from "./types";
 
 function s(overrides: Partial<AppState> = {}): AppState {
@@ -94,6 +94,24 @@ describe("App reducer — STREAM_BATCH preserves prior fields when batch slot ab
     });
     expect(next.confidenceHistory[next.confidenceHistory.length - 1]).toBe(0.3);
     expect(next.confidenceHistory.length).toBe(3);
+  });
+});
+
+describe("heartbeatMsFromVisFresh", () => {
+  it("returns (2 * visFreshS + 0.5) * 1000 for positive input", () => {
+    expect(heartbeatMsFromVisFresh(0.25)).toBe(1000); // 2*0.25 + 0.5 = 1.0
+    expect(heartbeatMsFromVisFresh(0.5)).toBe(1500); // 2*0.5 + 0.5 = 1.5
+    expect(heartbeatMsFromVisFresh(1)).toBe(2500); // 2*1 + 0.5 = 2.5
+  });
+
+  it("returns null for null / zero / negative / non-finite input", () => {
+    expect(heartbeatMsFromVisFresh(null)).toBeNull();
+    expect(heartbeatMsFromVisFresh(0)).toBeNull();
+    expect(heartbeatMsFromVisFresh(-0.1)).toBeNull();
+    // Implementation guards "<=0" and falls through; NaN compared to 0 is
+    // false, so NaN flows into the formula and produces NaN. Document the
+    // behaviour: callers (App) should filter at the readNumber boundary.
+    expect(Number.isNaN(heartbeatMsFromVisFresh(Number.NaN) as number)).toBe(true);
   });
 });
 

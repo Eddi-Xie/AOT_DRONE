@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ControlMode,
   TrackingState,
+  asLinkStatus,
   asTelUpdate,
   asVisUpdate,
   asWarningPayload,
@@ -178,6 +179,113 @@ describe("parseVisUpdate", () => {
     const result = parseVisUpdate({ confidence: "0.5" });
     expect(result.value).toBeNull();
     expect(result.mismatch).toMatch(/out of range/);
+  });
+
+  it("rejects loc_y out of [-1, 1]", () => {
+    const result = parseVisUpdate({ loc_y: 1.5 });
+    expect(result.value).toBeNull();
+    expect(result.mismatch).toMatch(/loc_y/);
+  });
+
+  it("rejects bound_w out of [0, 1]", () => {
+    const result = parseVisUpdate({ bound_w: -0.5 });
+    expect(result.value).toBeNull();
+    expect(result.mismatch).toMatch(/bound_w/);
+  });
+
+  it("rejects unknown VIS tracking_state values", () => {
+    const result = parseVisUpdate({ tracking_state: 42 });
+    expect(result.value).toBeNull();
+    expect(result.mismatch).toMatch(/tracking_state/);
+  });
+
+  it("strips wire-extra fields (closed-shape contract — VIS)", () => {
+    const result = parseVisUpdate({
+      confidence: 0.5,
+      future_field: { malicious: "payload" },
+    });
+    expect(result.mismatch).toBeNull();
+    const validated = result.value as Record<string, unknown> | null;
+    expect(validated).not.toBeNull();
+    expect(validated!).not.toHaveProperty("future_field");
+  });
+});
+
+describe("parseTelUpdate — additional spec rejection coverage", () => {
+  it("rejects bound_h > 1", () => {
+    const result = parseTelUpdate({ bound_h: 1.01 });
+    expect(result.value).toBeNull();
+    expect(result.mismatch).toMatch(/bound_h/);
+  });
+
+  it("rejects target_y < -1", () => {
+    const result = parseTelUpdate({ target_y: -1.5 });
+    expect(result.value).toBeNull();
+    expect(result.mismatch).toMatch(/target_y/);
+  });
+});
+
+describe("asLinkStatus", () => {
+  function validLinkStatus(): Record<string, unknown> {
+    return {
+      fc_connected: true,
+      fc_last_connect_attempt_s: null,
+      cmd_tx_total: 10,
+      cmd_tx_ok: 9,
+      cmd_tx_fail: 1,
+      cmd_last_sent_monotonic_s: 12.5,
+      cmd_hz_est: 50,
+      tracking_blocked_reason: null,
+      vis_age_s: 0.1,
+      vis_rx_ok: 100,
+      vis_rx_bad: 0,
+      vis_drop_reason_oversize: 0,
+      vis_drop_reason_json: 0,
+      vis_drop_reason_schema: 0,
+      vis_drop_reason_range: 0,
+      vis_drop_reason_semantics: 0,
+      tel_age_s: 0.05,
+      tel_rx_ok: 200,
+      tel_rx_bad: 0,
+      vis_fresh_s: 0.25,
+      tel_fresh_s: 0.5,
+      cmd_timeout_s: 0.5,
+      cmd_hz: 50,
+      tel_hz: 50,
+    };
+  }
+
+  it("returns null for non-record input", () => {
+    expect(asLinkStatus(null)).toBeNull();
+    expect(asLinkStatus("x")).toBeNull();
+    expect(asLinkStatus([])).toBeNull();
+  });
+
+  it("returns null when fc_connected is missing or wrong type", () => {
+    const valid = validLinkStatus();
+    delete valid.fc_connected;
+    expect(asLinkStatus(valid)).toBeNull();
+    expect(asLinkStatus({ ...validLinkStatus(), fc_connected: "true" })).toBeNull();
+    expect(asLinkStatus({ ...validLinkStatus(), fc_connected: 1 })).toBeNull();
+  });
+
+  it("strips wire-extra fields (closed-shape contract — LinkStatus)", () => {
+    const result = asLinkStatus({
+      ...validLinkStatus(),
+      future_unknown_field: { evil: 1 },
+    });
+    expect(result).not.toBeNull();
+    const r = result as unknown as Record<string, unknown>;
+    expect(r).not.toHaveProperty("future_unknown_field");
+  });
+
+  it("substitutes 0 for missing numeric fields", () => {
+    const partial = { fc_connected: true };
+    const result = asLinkStatus(partial);
+    expect(result?.cmd_tx_ok).toBe(0);
+    expect(result?.vis_fresh_s).toBe(0);
+    expect(result?.fc_last_connect_attempt_s).toBeNull();
+    expect(result?.tracking_blocked_reason).toBeNull();
   });
 });
 

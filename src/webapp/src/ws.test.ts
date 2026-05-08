@@ -116,6 +116,13 @@ describe("parseWsEnvelope", () => {
     ).toBeNull();
   });
 
+  it("accepts each documented WsEventType", () => {
+    for (const event of ["TEL_UPDATE", "VIS_UPDATE", "LINK_STATUS", "WARNING"]) {
+      const out = parseWsEnvelope({ event, data: {}, timestamp_s: 0, seq: 0 });
+      expect(out?.event).toBe(event);
+    }
+  });
+
   it("ws_ver of wrong type is silently dropped (forward-compat)", () => {
     const numeric = parseWsEnvelope({
       event: "WARNING",
@@ -601,7 +608,13 @@ describe("ReconnectingWsClient — lifecycle interactions", () => {
     client.stop();
   });
 
-  it("onerror clears the heartbeat timer so it can't re-call close() on a failing socket", () => {
+  it("onerror leaves the heartbeat armed as a fallback for dropped onclose", () => {
+    // Round-5 contract change: previous round 1 cleared the watchdog inside
+    // onerror to avoid a redundant close() on a failing socket. But that
+    // also removed the only mechanism that would force-recover from a
+    // browser/proxy that delivers onerror but never the matching onclose.
+    // close() on a closing/closed socket is a documented no-op, so leaving
+    // the timer armed is harmless and provides defense.
     const client = new ReconnectingWsClient({
       url: "ws://test",
       onEnvelope: () => {},
@@ -615,9 +628,147 @@ describe("ReconnectingWsClient — lifecycle interactions", () => {
     expect(vi.getTimerCount()).toBe(1); // heartbeat armed
 
     inst.onerror?.(new Event("error"));
-    // Heartbeat timer is now cleared; only no timers remain (the close()
-    // call is synchronous and does not arm anything new).
-    expect(vi.getTimerCount()).toBe(0);
+    // Heartbeat timer survives onerror.
+    expect(vi.getTimerCount()).toBe(1);
+
+    client.stop();
+  });
+
+  it("onerror flips connection state to disconnected immediately", () => {
+    // Round-5 fix: previously onerror only triggered close() and waited
+    // for onclose to update connected state. If the browser dropped
+    // onclose, the UI would stay "WS Connected" forever. onerror now also
+    // calls setConnected(false); a duplicate call from onclose is a no-op.
+    const states: boolean[] = [];
+    const client = new ReconnectingWsClient({
+      url: "ws://test",
+      onEnvelope: () => {},
+      onConnectionChange: (c) => states.push(c),
+      heartbeatTimeoutMs: 500,
+      rng: () => 0.5,
+    });
+    client.start();
+    const inst = lastInstance();
+    inst.onopen?.(new Event("open"));
+    expect(states).toEqual([true]);
+
+    inst.onerror?.(new Event("error"));
+    expect(states).toEqual([true, false]);
+
+    // A subsequent onclose must not fire another connection-change event.
+    inst.onclose?.({ code: 1006 } as CloseEvent);
+    expect(states).toEqual([true, false]);
+
+    client.stop();
+  });
+
+  it("WebSocket constructor throw is reported as a transport error", () => {
+    // Pre-fix: a misconfigured wsUrl (invalid scheme, malformed
+    // subprotocol) made the WebSocket constructor synchronously throw,
+    // and the catch block silently rescheduled with no transport event,
+    // no log, no counter bump. Operator never saw the 3x-error alert.
+    const events: WsTransportEvent[] = [];
+
+    // Override the FakeWebSocket installed in beforeEach with one that
+    // throws on construction.
+    class ThrowingWebSocket {
+      constructor() {
+        throw new Error("invalid url");
+      }
+    }
+    (globalThis as unknown as { WebSocket: unknown }).WebSocket =
+      ThrowingWebSocket as unknown as typeof WebSocket;
+
+    const client = new ReconnectingWsClient({
+      url: "ws://broken",
+      onEnvelope: () => {},
+      onConnectionChange: () => {},
+      onTransportEvent: (e) => events.push(e),
+      rng: () => 0.5,
+    });
+    client.start();
+
+    expect(events).toHaveLength(1);
+    expect(events[0].kind).toBe("error");
+    expect(events[0].consecutiveErrors).toBe(1);
+    expect(console.error).toHaveBeenCalled();
+
+    client.stop();
+  });
+
+  it("handleMessage drops malformed JSON without throwing", () => {
+    const envelopes: unknown[] = [];
+    const client = new ReconnectingWsClient({
+      url: "ws://test",
+      onEnvelope: (env) => envelopes.push(env),
+      onConnectionChange: () => {},
+      rng: () => 0.5,
+    });
+    client.start();
+    const inst = lastInstance();
+    inst.onopen?.(new Event("open"));
+
+    inst.onmessage?.({ data: "{not valid json" } as MessageEvent);
+    expect(envelopes).toEqual([]);
+
+    // Sanity: a valid frame still flows through.
+    inst.onmessage?.({
+      data: '{"event":"WARNING","data":{},"timestamp_s":0,"seq":0}',
+    } as MessageEvent);
+    expect(envelopes).toHaveLength(1);
+
+    client.stop();
+  });
+
+  it("seeded heartbeat (set before onopen) is honoured when the socket later opens", () => {
+    // App.tsx pattern: setHeartbeatTimeoutMs is called immediately after
+    // construction (before onopen) so a rebuilt client gets the cadence
+    // it learned from a previous LINK_STATUS. Verify the timeout is
+    // applied when onopen later arms the watchdog.
+    const client = new ReconnectingWsClient({
+      url: "ws://test",
+      onEnvelope: () => {},
+      onConnectionChange: () => {},
+      heartbeatTimeoutMs: 5000, // ignored; setHeartbeatTimeoutMs overrides
+      rng: () => 0.5,
+    });
+    client.start();
+    client.setHeartbeatTimeoutMs(200);
+
+    const inst = lastInstance();
+    inst.onopen?.(new Event("open"));
+
+    vi.advanceTimersByTime(199);
+    expect(inst.close).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(2);
+    expect(inst.close).toHaveBeenCalledTimes(1);
+
+    client.stop();
+  });
+
+  it("heartbeat-driven close emits an abnormal_close transport event with consecutiveErrors=1", () => {
+    // The heartbeat-cycle test below verifies timer side-effects; this
+    // one pins the contract that operators receive the same 3x escalation
+    // path for silent-stream failures as for active-error failures.
+    const events: WsTransportEvent[] = [];
+    const client = new ReconnectingWsClient({
+      url: "ws://test",
+      onEnvelope: () => {},
+      onConnectionChange: () => {},
+      onTransportEvent: (e) => events.push(e),
+      heartbeatTimeoutMs: 500,
+      rng: () => 0.5,
+    });
+    client.start();
+    const inst = lastInstance();
+    inst.onopen?.(new Event("open"));
+
+    vi.advanceTimersByTime(501);
+    inst.onclose?.({ code: 1006 } as CloseEvent);
+
+    expect(events).toHaveLength(1);
+    expect(events[0].kind).toBe("abnormal_close");
+    expect(events[0].consecutiveErrors).toBe(1);
 
     client.stop();
   });

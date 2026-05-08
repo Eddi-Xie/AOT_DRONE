@@ -22,6 +22,10 @@ interface TelemetryPanelProps {
   // recomputed in three places (App-level alerts, this body, the
   // buildVisionRows helper).
   projectedVisAgeS: number | null;
+  // App-level fresh threshold with the per-overlay default already applied.
+  // Reading raw linkStatus.vis_fresh_s here would diverge from the App-level
+  // alert when the wire value is 0 / missing — both must use the same value.
+  visFreshThresholdS: number;
 }
 
 function buildFcRows(
@@ -232,18 +236,12 @@ export default function TelemetryPanel({
   linkUpdatedAtMs,
   linkEnvelopeTimestampS,
   projectedVisAgeS,
+  visFreshThresholdS,
 }: TelemetryPanelProps): JSX.Element {
-  // Accent uses the App-projected vis_age so it tracks current freshness
-  // (rather than the snapshot value at LINK_STATUS arrival, which goes stale
-  // between frames and would let the accent stay green after the stream
-  // died).
-  const visFreshThresholdS = linkStatus ? readNumber(linkStatus.vis_fresh_s) : null;
+  // Accent uses the App-projected vis_age + the App-resolved threshold so
+  // it agrees with the App-level vis-stale derived alert.
   const visAccent =
-    projectedVisAgeS !== null &&
-    visFreshThresholdS !== null &&
-    projectedVisAgeS > visFreshThresholdS
-      ? "warn"
-      : "neutral";
+    projectedVisAgeS !== null && projectedVisAgeS > visFreshThresholdS ? "warn" : "neutral";
 
   return (
     <section className="panel telemetry-panel">

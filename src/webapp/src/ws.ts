@@ -176,6 +176,10 @@ export class ReconnectingWsClient {
     }
 
     this.clearReconnectTimer();
+    // Defense-in-depth: each new connect() starts with no live heartbeat
+    // timer. onclose normally clears it, but a future code path could miss
+    // that and silently leak a timer pointing at a dead socket.
+    this.clearHeartbeatTimer();
     this.errorAlreadyCounted = false;
 
     try {
@@ -183,6 +187,19 @@ export class ReconnectingWsClient {
         ? new WebSocket(this.url, this.subprotocols)
         : new WebSocket(this.url);
     } catch {
+      // Misconfigured wsUrl / invalid subprotocol header / DNS-resolved
+      // host with bad scheme: the WebSocket constructor synchronously
+      // throws. Treat it as a transport failure so the operator-facing
+      // 3x-consecutive alert can fire, instead of silently retry-looping.
+      this.consecutiveErrors += 1;
+      const payload: WsTransportEvent = {
+        kind: "error",
+        url: this.url,
+        timestampMs: Date.now(),
+        consecutiveErrors: this.consecutiveErrors,
+      };
+      console.error("[ReconnectingWsClient] constructor threw", payload);
+      this.onTransportEvent?.(payload);
       this.scheduleReconnect();
       return;
     }
@@ -224,10 +241,16 @@ export class ReconnectingWsClient {
       };
       console.error("[ReconnectingWsClient] transport error", payload);
       this.onTransportEvent?.(payload);
-      // Prevent the heartbeat from re-firing close() on an already-failed
-      // socket while we wait for the browser to deliver the matching
-      // onclose event.
-      this.clearHeartbeatTimer();
+      // Flip the connection state immediately. onclose normally also
+      // calls setConnected(false), but if the browser/proxy drops onclose
+      // (rare but observed in flaky HTTP/2 multiplexers), without this
+      // call the UI would stay "connected" against a dead socket. The
+      // setConnected guard makes a duplicate call from onclose a no-op.
+      this.setConnected(false);
+      // We deliberately leave the heartbeat timer armed — close() on a
+      // closing/closed socket is a documented no-op, so a watchdog that
+      // fires after onerror cannot harm the lifecycle and provides an
+      // additional reconnect trigger if onclose never lands.
       if (this.ws !== null) {
         this.ws.close();
       }
@@ -262,6 +285,9 @@ export class ReconnectingWsClient {
         console.error("[ReconnectingWsClient] abnormal close", payload);
         this.onTransportEvent?.(payload);
       }
+      // Each lifecycle owns its own flag; reset for the next connect()
+      // so the seen-error state can never leak forward across attempts.
+      this.errorAlreadyCounted = false;
 
       this.scheduleReconnect();
     };

@@ -52,8 +52,8 @@ function visAccent(html: string): string {
   return match[1];
 }
 
-describe("TelemetryPanel vision accent uses projected age", () => {
-  it("stays neutral when projectedVisAgeS < vis_fresh_s", () => {
+describe("TelemetryPanel vision accent uses projected age + App-resolved threshold", () => {
+  it("stays neutral when projectedVisAgeS < visFreshThresholdS", () => {
     const html = renderToString(
       <TelemetryPanel
         linkStatus={makeLinkStatus({ vis_fresh_s: 0.25 })}
@@ -63,12 +63,13 @@ describe("TelemetryPanel vision accent uses projected age", () => {
         linkUpdatedAtMs={1_000_000}
         linkEnvelopeTimestampS={null}
         projectedVisAgeS={0.1}
+        visFreshThresholdS={0.25}
       />,
     );
     expect(visAccent(html)).toBe("neutral");
   });
 
-  it("flips to warn when projectedVisAgeS > vis_fresh_s", () => {
+  it("flips to warn when projectedVisAgeS > visFreshThresholdS", () => {
     // The bug case from the original review: raw linkStatus.vis_age_s is
     // 0.1 (would have stayed neutral on the legacy comparison), but the
     // App-projected value is 1.1 s after 1 s of elapsed time, which
@@ -82,6 +83,7 @@ describe("TelemetryPanel vision accent uses projected age", () => {
         linkUpdatedAtMs={1_000_000}
         linkEnvelopeTimestampS={null}
         projectedVisAgeS={1.1}
+        visFreshThresholdS={0.25}
       />,
     );
     expect(visAccent(html)).toBe("warn");
@@ -97,15 +99,16 @@ describe("TelemetryPanel vision accent uses projected age", () => {
         linkUpdatedAtMs={1_000_000}
         linkEnvelopeTimestampS={null}
         projectedVisAgeS={null}
+        visFreshThresholdS={0.25}
       />,
     );
     expect(visAccent(html)).toBe("neutral");
   });
 
-  it("stays neutral when vis_fresh_s is missing (no threshold to compare)", () => {
-    // linkStatus shape has vis_fresh_s as required, but a backend that
-    // sends 0/negative should not trip the accent into warn purely on
-    // a missing threshold.
+  it("uses the App-resolved threshold (default substituted upstream when wire value is 0)", () => {
+    // App.tsx substitutes DEFAULT_VIS_FRESH_S = 0.25 when vis_fresh_s <= 0.
+    // The panel must agree: an age of 0.1 with the resolved 0.25 threshold
+    // stays neutral, regardless of the raw linkStatus.vis_fresh_s value.
     const html = renderToString(
       <TelemetryPanel
         linkStatus={makeLinkStatus({ vis_fresh_s: 0 })}
@@ -114,13 +117,10 @@ describe("TelemetryPanel vision accent uses projected age", () => {
         nowMs={1_000_000}
         linkUpdatedAtMs={1_000_000}
         linkEnvelopeTimestampS={null}
-        projectedVisAgeS={5.0}
+        projectedVisAgeS={0.1}
+        visFreshThresholdS={0.25}
       />,
     );
-    // visFreshThresholdS = 0 -> readNumber(0) returns 0, but 5.0 > 0 so
-    // technically the accent flips to warn. This pins down the contract:
-    // we DO trip on age > 0 when fresh_s = 0. If we wanted the opposite
-    // we would need an explicit "no-threshold" sentinel.
-    expect(visAccent(html)).toBe("warn");
+    expect(visAccent(html)).toBe("neutral");
   });
 });

@@ -348,7 +348,7 @@ function formatError(error: unknown): string {
 // Heartbeat watchdog cadence: 2x the publisher cadence + 0.5 s slack, in ms.
 // Returns null when vis_fresh_s is missing or non-positive (caller should
 // keep the previous value).
-function heartbeatMsFromVisFresh(visFreshS: number | null): number | null {
+export function heartbeatMsFromVisFresh(visFreshS: number | null): number | null {
   if (visFreshS === null || visFreshS <= 0) {
     return null;
   }
@@ -521,6 +521,10 @@ export default function App(): JSX.Element {
       if (frameIdRef.current !== null) {
         window.cancelAnimationFrame(frameIdRef.current);
       }
+      // Drop any partially-accumulated batch so the new client's first
+      // envelope can't merge into stale (linkStatus, latestTel) from the
+      // previous wsUrl/apiToken's session and briefly surface mixed data.
+      pendingBatchRef.current = { lastMessageAtMs: null };
     };
   }, [backendConfig.wsUrl, backendConfig.apiToken]);
 
@@ -843,6 +847,7 @@ export default function App(): JSX.Element {
               linkUpdatedAtMs={state.linkUpdatedAtMs}
               linkEnvelopeTimestampS={state.linkEnvelopeTimestampS}
               projectedVisAgeS={projectedVisAgeS}
+              visFreshThresholdS={visFreshThresholdS}
             />
           </ErrorBoundary>
         </div>
