@@ -17,9 +17,9 @@ import {
   WarningEntry,
   WsEnvelope,
   asLinkStatus,
-  asTelUpdate,
-  asVisUpdate,
   asWarningPayload,
+  parseTelUpdate,
+  parseVisUpdate,
   formatNumber,
   readNumber,
   toControlModeName,
@@ -53,6 +53,7 @@ interface AppState {
   intentPending: boolean;
   intentFeedbackKind: IntentFeedbackKind;
   intentFeedbackMessage: string;
+  schemaMismatchDetail: string | null;
 }
 
 interface PendingStreamBatch {
@@ -105,6 +106,7 @@ type AppAction =
       receivedAtMs: number;
     }
   | { type: "CLEAR_WARNINGS" }
+  | { type: "SCHEMA_MISMATCH_DETECTED"; detail: string }
   | { type: "SET_SELECTED_MODE"; mode: ControlMode }
   | { type: "SET_ARMED"; armed: boolean }
   | { type: "INTENT_PENDING"; message: string }
@@ -130,6 +132,7 @@ const INITIAL_STATE: AppState = {
   intentPending: false,
   intentFeedbackKind: "idle",
   intentFeedbackMessage: "Ready.",
+  schemaMismatchDetail: null,
 };
 
 function normalizeConfidenceSample(value: number | null): number {
@@ -277,6 +280,14 @@ function reducer(state: AppState, action: AppAction): AppState {
         ...state,
         warnings: [],
       };
+    case "SCHEMA_MISMATCH_DETECTED":
+      if (state.schemaMismatchDetail !== null) {
+        return state;
+      }
+      return {
+        ...state,
+        schemaMismatchDetail: action.detail,
+      };
     case "SET_SELECTED_MODE":
       return {
         ...state,
@@ -395,7 +406,11 @@ export default function App(): JSX.Element {
           pending.linkEnvelopeTimestampS = envelope.timestamp_s;
         }
       } else if (envelope.event === "TEL_UPDATE") {
-        const latestTel = asTelUpdate(envelope.data);
+        const parsed = parseTelUpdate(envelope.data);
+        if (parsed.mismatch !== null) {
+          dispatch({ type: "SCHEMA_MISMATCH_DETECTED", detail: parsed.mismatch });
+        }
+        const latestTel = parsed.value;
         if (latestTel) {
           pending.latestTel = latestTel;
           if (overlaySource === "TEL") {
@@ -404,7 +419,11 @@ export default function App(): JSX.Element {
           }
         }
       } else if (envelope.event === "VIS_UPDATE") {
-        const latestVis = asVisUpdate(envelope.data);
+        const parsed = parseVisUpdate(envelope.data);
+        if (parsed.mismatch !== null) {
+          dispatch({ type: "SCHEMA_MISMATCH_DETECTED", detail: parsed.mismatch });
+        }
+        const latestVis = parsed.value;
         if (latestVis) {
           pending.latestVis = latestVis;
           if (overlaySource === "VIS") {
@@ -614,12 +633,23 @@ export default function App(): JSX.Element {
       });
     }
 
+    // Sticky for the rest of the session — drift between backend and webapp
+    // schemas is a deploy-config bug, not a transient runtime state.
+    if (state.schemaMismatchDetail !== null) {
+      alerts.push({
+        id: "schema-mismatch",
+        detail: `Schema mismatch — ${state.schemaMismatchDetail}. Backend update needed.`,
+        severity: "warn",
+      });
+    }
+
     return alerts.slice(0, 5);
   }, [
     nowMs,
     projectedTelAgeS,
     projectedVisAgeS,
     state.linkStatus?.fc_connected,
+    state.schemaMismatchDetail,
     state.wsConnected,
     trackingBlockedReason,
     telFreshThresholdS,

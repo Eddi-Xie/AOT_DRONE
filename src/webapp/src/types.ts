@@ -231,18 +231,156 @@ export function asLinkStatus(value: unknown): LinkStatus | null {
   };
 }
 
-export function asTelUpdate(value: unknown): TelUpdate | null {
-  if (!isRecord(value)) {
-    return null;
+export interface ParsedUpdate<T> {
+  // The validated payload, or null if the input wasn't even a record (silently skipped).
+  value: T | null;
+  // Set when the input was a record but failed schema/range validation. Receivers
+  // should surface a one-shot warning so a backend-side schema drift doesn't fail
+  // silently.
+  mismatch: string | null;
+}
+
+const TRACKING_STATE_VALUES = new Set<number>([
+  TrackingState.NoTarget,
+  TrackingState.TargetDetected,
+  TrackingState.Tracking,
+  TrackingState.Searching,
+]);
+
+const CONTROL_MODE_VALUES = new Set<number>([
+  ControlMode.Manual,
+  ControlMode.Tracking,
+  ControlMode.LandSafely,
+  ControlMode.Takeoff,
+]);
+
+function readBoundedNumber(
+  value: unknown,
+  min: number,
+  max: number,
+): { value: number | null; outOfRange: boolean } {
+  if (value === undefined) {
+    return { value: null, outOfRange: false };
   }
-  return value as TelUpdate;
+  const parsed = readNumber(value);
+  if (parsed === null) {
+    return { value: null, outOfRange: true };
+  }
+  if (parsed < min || parsed > max) {
+    return { value: null, outOfRange: true };
+  }
+  return { value: parsed, outOfRange: false };
+}
+
+function readEnumNumber(
+  value: unknown,
+  allowed: Set<number>,
+): { value: number | null; outOfRange: boolean } {
+  if (value === undefined) {
+    return { value: null, outOfRange: false };
+  }
+  const parsed = readNumber(value);
+  if (parsed === null || !allowed.has(parsed)) {
+    return { value: null, outOfRange: true };
+  }
+  return { value: parsed, outOfRange: false };
+}
+
+export function parseTelUpdate(value: unknown): ParsedUpdate<TelUpdate> {
+  if (!isRecord(value)) {
+    return { value: null, mismatch: null };
+  }
+
+  const targetX = readBoundedNumber(value.target_x, -1, 1);
+  const targetY = readBoundedNumber(value.target_y, -1, 1);
+  const boundW = readBoundedNumber(value.bound_w, 0, 1);
+  const boundH = readBoundedNumber(value.bound_h, 0, 1);
+  const confidence = readBoundedNumber(value.confidence, 0, 1);
+  const trackingState = readEnumNumber(value.tracking_state, TRACKING_STATE_VALUES);
+  const controlMode = readEnumNumber(value.control_mode, CONTROL_MODE_VALUES);
+
+  if (
+    targetX.outOfRange ||
+    targetY.outOfRange ||
+    boundW.outOfRange ||
+    boundH.outOfRange ||
+    confidence.outOfRange ||
+    trackingState.outOfRange ||
+    controlMode.outOfRange
+  ) {
+    return { value: null, mismatch: "TEL_UPDATE field out of range or wrong type" };
+  }
+
+  const tel: TelUpdate = {
+    ...value,
+    type: readString(value.type) ?? undefined,
+    seq: readNumber(value.seq) ?? undefined,
+    timestamp_s: readNumber(value.timestamp_s) ?? undefined,
+    control_mode: controlMode.value ?? undefined,
+    tracking_state: trackingState.value ?? undefined,
+    distFront_m: readNumber(value.distFront_m) ?? undefined,
+    distBack_m: readNumber(value.distBack_m) ?? undefined,
+    distBottom_m: readNumber(value.distBottom_m) ?? undefined,
+    target_x: targetX.value ?? undefined,
+    target_y: targetY.value ?? undefined,
+    bound_w: boundW.value ?? undefined,
+    bound_h: boundH.value ?? undefined,
+    confidence: confidence.value ?? undefined,
+    cmd_age_s: readNumber(value.cmd_age_s) ?? undefined,
+    rx_monotonic_s: readNullableNumber(value.rx_monotonic_s),
+    tel_age_s: readNullableNumber(value.tel_age_s),
+  };
+
+  return { value: tel, mismatch: null };
+}
+
+export function parseVisUpdate(value: unknown): ParsedUpdate<VisUpdate> {
+  if (!isRecord(value)) {
+    return { value: null, mismatch: null };
+  }
+
+  const locX = readBoundedNumber(value.loc_x, -1, 1);
+  const locY = readBoundedNumber(value.loc_y, -1, 1);
+  const boundW = readBoundedNumber(value.bound_w, 0, 1);
+  const boundH = readBoundedNumber(value.bound_h, 0, 1);
+  const confidence = readBoundedNumber(value.confidence, 0, 1);
+  const trackingState = readEnumNumber(value.tracking_state, TRACKING_STATE_VALUES);
+
+  if (
+    locX.outOfRange ||
+    locY.outOfRange ||
+    boundW.outOfRange ||
+    boundH.outOfRange ||
+    confidence.outOfRange ||
+    trackingState.outOfRange
+  ) {
+    return { value: null, mismatch: "VIS_UPDATE field out of range or wrong type" };
+  }
+
+  const vis: VisUpdate = {
+    ...value,
+    type: readString(value.type) ?? undefined,
+    seq: readNumber(value.seq) ?? undefined,
+    timestamp_s: readNumber(value.timestamp_s) ?? undefined,
+    tracking_state: trackingState.value ?? undefined,
+    loc_x: locX.value ?? undefined,
+    loc_y: locY.value ?? undefined,
+    bound_w: boundW.value ?? undefined,
+    bound_h: boundH.value ?? undefined,
+    confidence: confidence.value ?? undefined,
+    rx_monotonic_s: readNullableNumber(value.rx_monotonic_s),
+    vis_age_s: readNullableNumber(value.vis_age_s),
+  };
+
+  return { value: vis, mismatch: null };
+}
+
+export function asTelUpdate(value: unknown): TelUpdate | null {
+  return parseTelUpdate(value).value;
 }
 
 export function asVisUpdate(value: unknown): VisUpdate | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-  return value as VisUpdate;
+  return parseVisUpdate(value).value;
 }
 
 export function asWarningPayload(value: unknown): WarningPayload | null {
