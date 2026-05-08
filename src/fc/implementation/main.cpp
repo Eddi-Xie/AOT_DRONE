@@ -177,10 +177,37 @@ int main() {
     std::cout << "[FC] CommandServer listening on " << fc_bind_host << ":" << proto::TCP_CMD_PORT
               << "\n";
 
-    fc::TelemetryPublisher telemetry_publisher("127.0.0.1", proto::UDP_TEL_PORT);
+    // TEL UDP destination is configurable so a multi-machine deployment
+    // (backend on a separate host) doesn't require a recompile. Defaults
+    // match the existing single-host setup. Mirrors FC_BIND_HOST shape from
+    // chore/sprint0-network.
+    const char* fc_tel_host_env = std::getenv("FC_TEL_HOST");
+    const std::string fc_tel_host =
+        (fc_tel_host_env && *fc_tel_host_env) ? std::string(fc_tel_host_env) : "127.0.0.1";
+
+    const char* fc_tel_port_env = std::getenv("FC_TEL_PORT");
+    int fc_tel_port = static_cast<int>(proto::UDP_TEL_PORT);
+    if (fc_tel_port_env && *fc_tel_port_env) {
+        try {
+            fc_tel_port = std::stoi(fc_tel_port_env);
+        } catch (const std::exception&) {
+            std::cerr << "[FC] Invalid FC_TEL_PORT='" << fc_tel_port_env
+                      << "', refusing to start (must be a positive integer)\n";
+            command_server.stop();
+            return 1;
+        }
+        if (fc_tel_port <= 0 || fc_tel_port > 65535) {
+            std::cerr << "[FC] FC_TEL_PORT=" << fc_tel_port
+                      << " out of range [1, 65535], refusing to start\n";
+            command_server.stop();
+            return 1;
+        }
+    }
+
+    fc::TelemetryPublisher telemetry_publisher(fc_tel_host, fc_tel_port);
     if (!telemetry_publisher.ok()) {
-        std::cerr << "[FC] Failed to init UDP telemetry publisher for 127.0.0.1:"
-                  << proto::UDP_TEL_PORT << "\n";
+        std::cerr << "[FC] Failed to init UDP telemetry publisher for " << fc_tel_host << ":"
+                  << fc_tel_port << "\n";
         command_server.stop();
         return 1;
     }
@@ -189,7 +216,7 @@ int main() {
     flight_controller.setControlMode(fc::ControlMode::LandSafely);
 
     std::cout << "[FC] fc_app running. CMD TCP:" << proto::TCP_CMD_PORT
-              << " TEL UDP:127.0.0.1:" << proto::UDP_TEL_PORT << "\n";
+              << " TEL UDP:" << fc_tel_host << ":" << fc_tel_port << "\n";
 
     // Signed-modular int32 comparator on cmd.seq handles wrap correctly:
     // a fresh seq of 0 after CMD_SEQ_MAX is treated as "ahead by 1", not
