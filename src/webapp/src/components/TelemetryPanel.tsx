@@ -8,6 +8,7 @@ import {
   toControlModeName,
   toTrackingStateName,
 } from "../types";
+import { projectAge } from "../utils/format";
 
 interface TelemetryPanelProps {
   linkStatus: LinkStatus | null;
@@ -16,23 +17,6 @@ interface TelemetryPanelProps {
   nowMs: number;
   linkUpdatedAtMs: number | null;
   linkEnvelopeTimestampS: number | null;
-}
-
-function projectAge(
-  snapshotAgeS: number | null,
-  snapshotAtMs: number | null,
-  nowMs: number,
-): number | null {
-  if (snapshotAgeS === null) {
-    return null;
-  }
-
-  if (snapshotAtMs === null) {
-    return snapshotAgeS;
-  }
-
-  const elapsedS = Math.max(0, (nowMs - snapshotAtMs) / 1000);
-  return snapshotAgeS + elapsedS;
 }
 
 function buildFcRows(
@@ -245,6 +229,21 @@ export default function TelemetryPanel({
   linkUpdatedAtMs,
   linkEnvelopeTimestampS,
 }: TelemetryPanelProps): JSX.Element {
+  // Use the wall-clock-projected vis_age (snapshot age + elapsed since
+  // LINK_STATUS arrived) so the accent reflects current freshness. The raw
+  // snapshot value goes stale between LINK_STATUS frames and would let the
+  // accent stay green even after the stream had clearly died.
+  const projectedVisAgeS = linkStatus
+    ? projectAge(readNumber(linkStatus.vis_age_s), linkUpdatedAtMs, nowMs)
+    : null;
+  const visFreshThresholdS = linkStatus ? readNumber(linkStatus.vis_fresh_s) : null;
+  const visAccent =
+    projectedVisAgeS !== null &&
+    visFreshThresholdS !== null &&
+    projectedVisAgeS > visFreshThresholdS
+      ? "warn"
+      : "neutral";
+
   return (
     <section className="panel telemetry-panel">
       <h2>Status &amp; Telemetry</h2>
@@ -259,13 +258,7 @@ export default function TelemetryPanel({
         <StatusCard
           title="Vision Link"
           rows={buildVisionRows(linkStatus, nowMs, linkUpdatedAtMs)}
-          accent={
-            linkStatus !== null &&
-            linkStatus.vis_age_s !== null &&
-            linkStatus.vis_age_s > linkStatus.vis_fresh_s
-              ? "warn"
-              : "neutral"
-          }
+          accent={visAccent}
         />
 
         <StatusCard
