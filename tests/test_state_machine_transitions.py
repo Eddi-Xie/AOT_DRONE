@@ -96,6 +96,100 @@ def test_pipeline_state_machine_core_transitions() -> None:
     assert tracker.init_calls == 2
 
 
+def test_target_detected_grace_absorbs_single_missed_detection() -> None:
+    """A 1-frame missed-detection blip in TARGET_DETECTED should NOT fall back
+    to NO_TARGET. The next frame with a detection resumes hold accumulation."""
+    detector = _SequenceDetector(
+        by_frame=(
+            (_det(100.0, 100.0, 80.0, 80.0),),  # frame 1: detection
+            (),  # frame 2: missed (the blip — should be absorbed by grace)
+            (_det(101.0, 100.0, 80.0, 80.0),),  # frame 3: detection again
+        )
+    )
+    tracker = _SequenceTracker(updates=())
+    pipeline = VisionPipeline(
+        detector=detector,
+        tracker=tracker,
+        # detect_hold_n=5 keeps us in TARGET_DETECTED across all 3 frames
+        # (won't promote to TRACKING within the test window).
+        config=VisionPipelineConfig(
+            detect_hold_n=5, search_n=2, detect_every_n=1, target_detected_grace_frames=1
+        ),
+    )
+
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    states = [pipeline.process_frame(frame=frame, frame_id=i).state for i in range(1, 4)]
+
+    # Without grace: states would be [TARGET_DETECTED, NO_TARGET, TARGET_DETECTED]
+    # With 1-frame grace: the missed frame stays in TARGET_DETECTED.
+    assert states == [
+        VisState.TARGET_DETECTED,
+        VisState.TARGET_DETECTED,
+        VisState.TARGET_DETECTED,
+    ]
+
+
+def test_target_detected_falls_back_after_grace_exhausted() -> None:
+    """Two consecutive missed detections (with grace=1) DO fall back to NO_TARGET."""
+    detector = _SequenceDetector(
+        by_frame=(
+            (_det(100.0, 100.0, 80.0, 80.0),),  # frame 1: detection
+            (),  # frame 2: missed (consumes the 1-frame grace)
+            (),  # frame 3: missed again (grace exhausted; fall back)
+        )
+    )
+    tracker = _SequenceTracker(updates=())
+    pipeline = VisionPipeline(
+        detector=detector,
+        tracker=tracker,
+        config=VisionPipelineConfig(
+            detect_hold_n=5, search_n=2, detect_every_n=1, target_detected_grace_frames=1
+        ),
+    )
+
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    states = [pipeline.process_frame(frame=frame, frame_id=i).state for i in range(1, 4)]
+
+    assert states == [
+        VisState.TARGET_DETECTED,
+        VisState.TARGET_DETECTED,  # grace absorbs first miss
+        VisState.NO_TARGET,  # grace exhausted, fall back
+    ]
+
+
+def test_target_detected_grace_resets_on_successful_detection() -> None:
+    """A successful detection while in TARGET_DETECTED resets the miss streak so
+    a later isolated missed frame still gets full grace coverage."""
+    detector = _SequenceDetector(
+        by_frame=(
+            (_det(100.0, 100.0, 80.0, 80.0),),  # frame 1: detection
+            (),  # frame 2: missed (consumes grace)
+            (_det(102.0, 100.0, 80.0, 80.0),),  # frame 3: detection (resets)
+            (),  # frame 4: missed (uses fresh grace)
+            (_det(105.0, 100.0, 80.0, 80.0),),  # frame 5: detection
+        )
+    )
+    tracker = _SequenceTracker(updates=())
+    pipeline = VisionPipeline(
+        detector=detector,
+        tracker=tracker,
+        config=VisionPipelineConfig(
+            detect_hold_n=10, search_n=2, detect_every_n=1, target_detected_grace_frames=1
+        ),
+    )
+
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    states = [pipeline.process_frame(frame=frame, frame_id=i).state for i in range(1, 6)]
+
+    assert states == [
+        VisState.TARGET_DETECTED,
+        VisState.TARGET_DETECTED,  # grace absorbs miss
+        VisState.TARGET_DETECTED,  # detection resets streak
+        VisState.TARGET_DETECTED,  # fresh grace absorbs miss
+        VisState.TARGET_DETECTED,
+    ]
+
+
 def test_tracking_prefers_detector_when_tracker_fails_same_frame() -> None:
     detector = _SequenceDetector(
         by_frame=(

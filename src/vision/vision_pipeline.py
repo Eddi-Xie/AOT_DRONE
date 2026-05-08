@@ -30,6 +30,14 @@ class VisionPipelineConfig:
     detect_every_n: int = 1
     desired_cx: float = 0.5
     desired_cy: float = 0.5
+    # While in TARGET_DETECTED, tolerate this many consecutive frames with
+    # no detection before falling back to NO_TARGET. The previous behaviour
+    # was an instant fall-back on any missed frame, which made a single
+    # missed detection (e.g. one bad YOLO inference) reset the entire
+    # detect-hold accumulation. 1-frame grace covers the common single-
+    # frame blip without delaying the genuine target-lost case beyond ~1
+    # frame at the pipeline's detection rate.
+    target_detected_grace_frames: int = 1
 
     def __post_init__(self) -> None:
         if self.detect_hold_n < 0:
@@ -42,6 +50,8 @@ class VisionPipelineConfig:
             raise ValueError("desired_cx must be in [0, 1]")
         if not (0.0 <= self.desired_cy <= 1.0):
             raise ValueError("desired_cy must be in [0, 1]")
+        if self.target_detected_grace_frames < 0:
+            raise ValueError("target_detected_grace_frames must be >= 0")
 
 
 class VisionPipeline:
@@ -64,6 +74,12 @@ class VisionPipeline:
         self._last_detection_frame: int | None = None
 
         self._tracker_active = False
+        # Counter for consecutive missed-detection frames in TARGET_DETECTED.
+        # Reset on (a) entry to TARGET_DETECTED from another state and
+        # (b) any successful detection while in TARGET_DETECTED. Compared
+        # against config.target_detected_grace_frames before the fallback
+        # to NO_TARGET fires.
+        self._target_detected_miss_streak = 0
 
     @property
     def state(self) -> VisState:
@@ -77,6 +93,7 @@ class VisionPipeline:
         self._last_detection = None
         self._last_detection_frame = None
         self._tracker_active = False
+        self._target_detected_miss_streak = 0
         self.tracker.reset()
 
     def process_frame(self, frame: np.ndarray, frame_id: int) -> TrackerResult:
@@ -111,6 +128,7 @@ class VisionPipeline:
         self._detected_box = detected
         self._detected_hold_counter = 0
         self._search_counter = 0
+        self._target_detected_miss_streak = 0
         return _zero_result(VisState.TARGET_DETECTED)
 
     def _update_target_detected(
@@ -127,9 +145,19 @@ class VisionPipeline:
             current = self._reuse_last_detection(frame_id)
 
         if current is None:
+            # Grace window: a single missed detection in TARGET_DETECTED is
+            # treated as a transient blip rather than "target gone". Hold
+            # the state, increment the miss streak, and return zero+state.
+            # Falls through to _transition_no_target only after the streak
+            # exceeds the configured grace.
+            self._target_detected_miss_streak += 1
+            if self._target_detected_miss_streak <= self.config.target_detected_grace_frames:
+                return _zero_result(VisState.TARGET_DETECTED)
             self._transition_no_target()
             return _zero_result(VisState.NO_TARGET)
 
+        # Successful detection (or reuse) — reset the miss streak.
+        self._target_detected_miss_streak = 0
         self._detected_box = current
         self._detected_hold_counter += 1
 
@@ -177,6 +205,7 @@ class VisionPipeline:
             self._detected_box = detected
             self._detected_hold_counter = 0
             self._search_counter = 0
+            self._target_detected_miss_streak = 0
             return _zero_result(VisState.TARGET_DETECTED)
 
         self._search_counter += 1
@@ -191,6 +220,7 @@ class VisionPipeline:
         self._detected_hold_counter = 0
         self._search_counter = 0
         self._detected_box = None
+        self._target_detected_miss_streak = 0
         self.tracker.reset()
         self._tracker_active = False
 
