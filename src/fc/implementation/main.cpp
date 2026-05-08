@@ -8,18 +8,21 @@
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <clocale>
 #include <cmath>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <locale>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <thread>
 
 namespace {
@@ -201,11 +204,14 @@ int main() {
     const char* fc_tel_port_env = std::getenv("FC_TEL_PORT");
     int fc_tel_port = static_cast<int>(proto::UDP_TEL_PORT);
     if (fc_tel_port_env && *fc_tel_port_env) {
-        try {
-            fc_tel_port = std::stoi(fc_tel_port_env);
-        } catch (const std::exception&) {
+        // Strict parse: from_chars rejects trailing junk (e.g. "9001abc"),
+        // unlike std::stoi which silently accepts the leading digits.
+        const char* const begin = fc_tel_port_env;
+        const char* const end = begin + std::strlen(begin);
+        auto [ptr, ec] = std::from_chars(begin, end, fc_tel_port);
+        if (ec != std::errc{} || ptr != end) {
             std::cerr << "[FC] Invalid FC_TEL_PORT='" << fc_tel_port_env
-                      << "', refusing to start (must be a positive integer)\n";
+                      << "', refusing to start (must be a base-10 integer with no trailing junk)\n";
             command_server.stop();
             return 1;
         }
@@ -260,11 +266,26 @@ int main() {
         last_tick = now;
 
         fc::CommandFrame cmd;
-        double cmd_recv_time_s = 0.0;
-        // Single-mutex snapshot so the seq filter and the cmd_age check below
-        // are computed against the same CMD frame.
-        const bool have_cmd = command_server.latest_command_with_time(cmd, cmd_recv_time_s);
-        if (have_cmd &&
+        // latest_command and seconds_since_last_cmd are read separately, not
+        // from a single coherent snapshot. That's intentional: a writer commit
+        // between the two reads strictly improves staleness accuracy (cmd_age
+        // below reflects the freshest network frame, even if a newer CMD
+        // raced in after this seq read). The atomic-publish fix in
+        // CommandServer just guarantees each call returns a self-consistent
+        // value; main.cpp doesn't need cross-call atomicity here.
+        constexpr std::int32_t kCmdSeqMaxFc = 0x7FFFFFFF; // mirrors backend CMD_SEQ_MAX
+        const bool have_cmd = command_server.latest_command(cmd);
+        const bool seq_in_range = have_cmd && cmd.seq >= 0 && cmd.seq <= kCmdSeqMaxFc;
+        if (have_cmd && !seq_in_range) {
+            // Out-of-range seqs (negative or > CMD_SEQ_MAX) violate the wire
+            // contract. seq_advances would still produce a deterministic
+            // boolean, but the modular comparison is undefined outside
+            // [0, CMD_SEQ_MAX] — drop with a log instead of letting a
+            // malformed CMD poison last_cmd_seq.
+            std::cerr << "[FC] Dropped CMD with out-of-range seq=" << cmd.seq << " (must be in [0, "
+                      << kCmdSeqMaxFc << "])\n";
+        }
+        if (seq_in_range &&
             (!last_cmd_seq.has_value() ||
              fc::cmd::seq_advances(*last_cmd_seq, static_cast<std::int32_t>(cmd.seq)))) {
             last_cmd_seq = static_cast<std::int32_t>(cmd.seq);
