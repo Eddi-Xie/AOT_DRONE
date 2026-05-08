@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -258,7 +259,13 @@ class VisionPipeline:
                 self._tracker_active = bool(
                     self.tracker.initialize(frame=frame, bbox=detected.bbox)
                 )
-                self._last_tracker_bbox = detected.bbox if self._tracker_active else None
+            # Refresh the cached tracker bbox to the just-arrived detection
+            # regardless of whether we re-initialised — on the high-IoU
+            # no-reinit path the previous code left _last_tracker_bbox
+            # pinned to a stale value, so subsequent IoU checks ran against
+            # an old box. Using the freshest known bbox keeps the IoU
+            # comparator meaningful across long detection streaks.
+            self._last_tracker_bbox = detected.bbox if self._tracker_active else None
             # Detection frame: re-seed the published confidence from the
             # detector's own confidence (audit A9). The previous behaviour
             # was hardcoded conf=1.0 regardless of detector output, which
@@ -359,7 +366,11 @@ class VisionPipeline:
         return None
 
 
-def _tracking_result(bbox: PixelBBox, img_w: int, img_h: int, conf: float = 1.0) -> TrackerResult:
+def _tracking_result(bbox: PixelBBox, img_w: int, img_h: int, *, conf: float) -> TrackerResult:
+    # `conf` is keyword-only and required: pre-S0.5 this defaulted to 1.0,
+    # which silently masked the real-confidence-passthrough work in audit
+    # A9. Forcing every call site to pass conf explicitly prevents a
+    # future refactor from accidentally regressing back to "always 1.0".
     normalized_bbox = normalize_bbox_xywh(
         x=bbox.x,
         y=bbox.y,
@@ -388,9 +399,15 @@ def _zero_result(state: VisState) -> TrackerResult:
 def _iou(a: PixelBBox, b: PixelBBox) -> float:
     """Intersection-over-Union for two pixel-space (x, y, w, h) boxes.
 
-    Returns 0.0 for non-overlapping boxes or zero-area inputs (rather than
-    NaN), so callers can do plain `<` comparisons against a threshold.
+    Returns 0.0 for non-overlapping boxes, zero-area inputs, or any non-
+    finite coordinate (NaN/Inf). Without the finite-guard, NaN inputs would
+    silently produce NaN here, and `NaN < threshold` is False — meaning
+    `should_reinit` in `_update_tracking` would evaluate False and the
+    tracker would NOT be re-initialised on a NaN-poisoned detection. The
+    explicit zero-on-non-finite forces a re-init in that pathological case.
     """
+    if not all(math.isfinite(v) for v in (a.x, a.y, a.w, a.h, b.x, b.y, b.w, b.h)):
+        return 0.0
     if a.w <= 0.0 or a.h <= 0.0 or b.w <= 0.0 or b.h <= 0.0:
         return 0.0
     a_x2 = a.x + a.w

@@ -6,7 +6,11 @@ import numpy as np
 import pytest
 
 from src.vision.types import Detection, PixelBBox, VisState
-from src.vision.vision_pipeline import VisionPipeline, VisionPipelineConfig
+from src.vision.vision_pipeline import (
+    VisionPipeline,
+    VisionPipelineConfig,
+    _iou,
+)
 
 
 def _det(x: float, y: float, w: float, h: float, conf: float = 0.9) -> Detection:
@@ -415,6 +419,38 @@ def test_tracker_only_confidence_clamps_at_floor() -> None:
 
     # After many decays, conf must rest at the floor exactly — never below.
     assert last_conf == 0.3
+
+
+def test_iou_handles_boundary_cases() -> None:
+    """Direct test of _iou helper for the cases that previously only had
+    indirect coverage via the re-init tests."""
+    # Identical boxes => IoU 1.0
+    a = PixelBBox(x=0.0, y=0.0, w=10.0, h=10.0)
+    assert _iou(a, a) == 1.0
+
+    # Fully disjoint
+    b = PixelBBox(x=100.0, y=100.0, w=10.0, h=10.0)
+    assert _iou(a, b) == 0.0
+
+    # Touching edges (zero intersection area)
+    c = PixelBBox(x=10.0, y=0.0, w=10.0, h=10.0)
+    assert _iou(a, c) == 0.0
+
+    # Half overlap horizontally => intersection 50, union 150 => 1/3
+    d = PixelBBox(x=5.0, y=0.0, w=10.0, h=10.0)
+    assert _iou(a, d) == pytest.approx(50.0 / 150.0)
+
+    # Zero-area inputs
+    zero_w = PixelBBox(x=0.0, y=0.0, w=0.0, h=10.0)
+    assert _iou(zero_w, a) == 0.0
+    zero_h = PixelBBox(x=0.0, y=0.0, w=10.0, h=0.0)
+    assert _iou(zero_h, a) == 0.0
+
+    # NaN coordinate => 0.0 (so the should_reinit check evaluates
+    # 0.0 < threshold = True, forcing re-init on a poisoned input)
+    nan_box = PixelBBox(x=float("nan"), y=0.0, w=10.0, h=10.0)
+    assert _iou(nan_box, a) == 0.0
+    assert _iou(a, nan_box) == 0.0
 
 
 def test_low_seed_conf_decays_freely_below_floor() -> None:
