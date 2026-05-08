@@ -20,3 +20,7 @@ add_test(NAME test_cmd_seq_wrap COMMAND test_cmd_seq_wrap)
 add_executable(test_command_server_atomic test_command_server_atomic.cpp)
 target_link_libraries(test_command_server_atomic PRIVATE fc)
 add_test(NAME test_command_server_atomic COMMAND test_command_server_atomic)
+
+add_executable(test_locale_safe_json test_locale_safe_json.cpp)
+target_link_libraries(test_locale_safe_json PRIVATE fc)
+add_test(NAME test_locale_safe_json COMMAND test_locale_safe_json)

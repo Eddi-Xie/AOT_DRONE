@@ -9,12 +9,14 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <clocale>
 #include <cmath>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
+#include <locale>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -136,6 +138,10 @@ std::string build_tel_json(uint64_t seq, const fc::TelemetryData& telemetry,
     }
 
     std::ostringstream oss;
+    // Pin the C locale on this stream so float formatting always uses '.' as
+    // the decimal separator regardless of the process locale (e.g.
+    // de_DE.UTF-8 would otherwise produce "1,234567" — invalid JSON).
+    oss.imbue(std::locale::classic());
     oss << std::fixed << std::setprecision(6);
     oss << "{"
         << "\"type\":\"TEL\","
@@ -158,6 +164,13 @@ std::string build_tel_json(uint64_t seq, const fc::TelemetryData& telemetry,
 } // namespace
 
 int main() {
+    // Pin LC_NUMERIC=C process-wide so any future float formatter (sprintf,
+    // strtod, etc.) is locale-safe by default. The TEL JSON ostringstream
+    // additionally imbues std::locale::classic() in build_tel_json — defence
+    // in depth against a third-party library that flips the locale at
+    // runtime.
+    std::setlocale(LC_NUMERIC, "C");
+
     std::signal(SIGINT, handle_signal);
     std::signal(SIGTERM, handle_signal);
 
