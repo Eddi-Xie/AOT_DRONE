@@ -200,6 +200,16 @@ int main() {
     std::optional<std::int32_t> last_cmd_seq;
     uint64_t tel_seq = 0;
 
+    // Stale-CMD failsafe: enter LandSafely on the fresh -> stale transition
+    // only, not on every tick. The previous code re-stomped setControlMode
+    // every iteration (50 Hz), which spammed log output and prevented any
+    // observability into "did we just enter failsafe vs have we been here
+    // for a while". The end state is identical to today's (LandSafely while
+    // stale), but the entry is now an event, not a per-tick stomp. The
+    // two-stage Healthy/StaleSoft/StaleHard state machine + auto-resume is
+    // an in-flight-behaviour change deferred to S0.7 (HIL bench gate).
+    bool failsafe_engaged = false;
+
     const auto period = std::chrono::milliseconds(1000 / kTelHz);
     auto next_tick = std::chrono::steady_clock::now();
     auto last_tick = next_tick;
@@ -242,8 +252,19 @@ int main() {
         }
 
         const double cmd_age_s = command_server.seconds_since_last_cmd();
-        if (cmd_age_s > proto::CMD_TIMEOUT_S) {
+        const bool stale_now = cmd_age_s > proto::CMD_TIMEOUT_S;
+        if (stale_now && !failsafe_engaged) {
+            failsafe_engaged = true;
             flight_controller.setControlMode(fc::ControlMode::LandSafely);
+            std::cerr << "[FC] CMD link stale (age=" << cmd_age_s << "s > " << proto::CMD_TIMEOUT_S
+                      << "s); entering LandSafely failsafe\n";
+        } else if (!stale_now && failsafe_engaged) {
+            failsafe_engaged = false;
+            // Don't auto-resume the prior mode — operator confirms recovery
+            // by sending a fresh CMD with desired_mode set explicitly. Auto-
+            // resume is part of the deferred two-stage state machine (S0.7).
+            std::cerr << "[FC] CMD link recovered (age=" << cmd_age_s
+                      << "s); staying in LandSafely until next CMD\n";
         }
 
         (void)flight_controller.updateTimeStep(dt);
