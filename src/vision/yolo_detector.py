@@ -54,6 +54,24 @@ class YoloDetector(Detector):
                 f"from --model-path={model_path!r} (resolved={self.model_spec!r})"
             ) from exc
 
+        # Warmup: run a single dummy inference now so the first real frame
+        # doesn't pay the Ultralytics JIT/graph-compile penalty (typical
+        # 200-500ms on first predict()). The dummy is a 640x480 black image —
+        # cheap, no detections expected, and exercises the same predict()
+        # path real frames go through. Failures are logged but non-fatal:
+        # operators that pass an unusable model would already have hit
+        # YOLO() above.
+        try:
+            self._model.predict(
+                source=np.zeros((480, 640, 3), dtype=np.uint8),
+                verbose=False,
+                conf=self.conf_threshold,
+                classes=[self.target_class],
+                imgsz=self.infer_width,
+            )
+        except Exception as exc:  # pragma: no cover — defence in depth on init
+            print(f"vision detect: YOLO warmup inference failed: {exc}", file=sys.stderr)
+
     def detect(self, frame: np.ndarray, frame_id: int) -> Sequence[Detection]:
         del frame_id
 
