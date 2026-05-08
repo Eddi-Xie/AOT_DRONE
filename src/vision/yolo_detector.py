@@ -56,18 +56,25 @@ class YoloDetector(Detector):
 
         # Warmup: run a single dummy inference now so the first real frame
         # doesn't pay the Ultralytics JIT/graph-compile penalty (typical
-        # 200-500ms on first predict()). The dummy is a 640x480 black image —
-        # cheap, no detections expected, and exercises the same predict()
-        # path real frames go through. Failures are logged but non-fatal:
-        # operators that pass an unusable model would already have hit
-        # YOLO() above.
+        # 200-500ms on first predict()).
+        #
+        # The dummy frame's shape MUST match the geometry that real frames
+        # produce after `_resolve_imgsz` — otherwise Ultralytics may JIT-
+        # compile a separate graph for the production tuple-imgsz path and
+        # the first real frame still pays the cost. We synthesise a dummy
+        # at the production aspect ratio (3:4 for the default 640x480) so
+        # the warmup imgsz is the same `(scaled_h, infer_width)` tuple the
+        # detect() path resolves.
+        warmup_h = max(1, int(round(self.infer_width * 3 / 4)))
+        warmup_frame = np.zeros((warmup_h, self.infer_width, 3), dtype=np.uint8)
+        warmup_imgsz = self._resolve_imgsz(warmup_frame)
         try:
             self._model.predict(
-                source=np.zeros((480, 640, 3), dtype=np.uint8),
+                source=warmup_frame,
                 verbose=False,
                 conf=self.conf_threshold,
                 classes=[self.target_class],
-                imgsz=self.infer_width,
+                imgsz=warmup_imgsz,
             )
         except Exception as exc:  # pragma: no cover — defence in depth on init
             print(f"vision detect: YOLO warmup inference failed: {exc}", file=sys.stderr)
