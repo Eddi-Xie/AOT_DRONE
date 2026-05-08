@@ -247,7 +247,11 @@ int main() {
         last_tick = now;
 
         fc::CommandFrame cmd;
-        if (command_server.latest_command(cmd) &&
+        double cmd_recv_time_s = 0.0;
+        // Single-mutex snapshot so the seq filter and the cmd_age check below
+        // are computed against the same CMD frame.
+        const bool have_cmd = command_server.latest_command_with_time(cmd, cmd_recv_time_s);
+        if (have_cmd &&
             (!last_cmd_seq.has_value() ||
              fc::cmd::seq_advances(*last_cmd_seq, static_cast<std::int32_t>(cmd.seq)))) {
             last_cmd_seq = static_cast<std::int32_t>(cmd.seq);

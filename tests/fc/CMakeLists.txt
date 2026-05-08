@@ -16,3 +16,7 @@ add_test(NAME test_clamp COMMAND test_clamp)
 add_executable(test_cmd_seq_wrap test_cmd_seq_wrap.cpp)
 target_link_libraries(test_cmd_seq_wrap PRIVATE fc)
 add_test(NAME test_cmd_seq_wrap COMMAND test_cmd_seq_wrap)
+
+add_executable(test_command_server_atomic test_command_server_atomic.cpp)
+target_link_libraries(test_command_server_atomic PRIVATE fc)
+add_test(NAME test_command_server_atomic COMMAND test_command_server_atomic)
