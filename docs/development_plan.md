@@ -1239,4 +1239,159 @@ If Eddi can move past these without John, they go in Sprint 0:
   unblocking the deferred Manual+arm:true ordering fix from S0.4
   (per ADR-004).
 
+### 2026-05-08 — Eddi + Claude — S0.6 multi-agent review + 6 follow-up rounds
+
+- Same branch (`chore/sprint0-webapp-software`). Initial PR was opened
+  with the 8 commits from 2026-05-07. Three parallel general-purpose
+  review subagents flagged 30+ issues across security/robustness, test
+  gaps, and code-quality. Findings overlapped strongly (3/3 agreement
+  on the WS double-count bug), giving high signal. Six follow-up
+  commits closed the loop; review was repeated twice (iterations 2
+  and 3) until subsequent passes returned only no-action items.
+- 6 follow-up commits on the same branch:
+  1. `fix(webapp): ws lifecycle hardening from review (round 1)` —
+     CRITICAL: onerror bumped consecutiveErrors then called close(),
+     and onclose's abnormal-close branch bumped again, so the "alert
+     at 3 consecutive errors" threshold tripped at ~2 real failures.
+     Test masked it because the FakeWebSocket close stub never fired
+     onclose. Fix: track `errorAlreadyCounted` flag (cleared on each
+     connect() and onopen); onclose skips the bump+dispatch when
+     onerror already counted. Plus: stop() now passes 1000 explicitly
+     and nulls the listener slots before close (no more phantom
+     abnormal_close events on every webapp unmount); !this.active
+     guards on onmessage / onerror / onclose; parseWsEnvelope seq
+     tightened to `Number.isInteger && >= 0`; `setTimeout` IDs typed
+     via `ReturnType<typeof setTimeout>` instead of `as unknown as
+     number`.
+  2. `fix(webapp): App.tsx WS lifecycle stability + projectAge hoist
+     (round 2)` — MAJOR: WS effect deps included `handleParsedEnvelope`
+     which depended on `overlaySource`, so toggling the overlay tore
+     down the WS client and rebuilt it (losing heartbeat config). Fix:
+     pin `handleParsedEnvelope` behind a ref. Also: heartbeat watchdog
+     not reapplied when WS rebuilt (visFreshFromLink dep alone) — added
+     `visFreshRef` so the WS-creating effect seeds the new client
+     immediately. Hoisted `projectAge(linkStatus.vis_age_s, ...)` out of
+     three call sites; `projectedVisAgeS` now flows as a TelemetryPanel
+     prop. TelemetryPanel test `visAccent` helper hardened (throws on
+     0 or >1 Vision Link cards instead of silently picking the first).
+  3. `fix(webapp): tighten schema validation + close index-signature
+     leak (round 3)` — MAJOR: `parseTelUpdate` / `parseVisUpdate` did
+     `{ ...value, ... }` which spread the raw payload then overwrote
+     known keys; extra/unknown wire fields flowed through unvalidated,
+     and `[key: string]: unknown` on TelUpdate / VisUpdate let
+     downstream code trust them. Closed-shape contract: dropped the
+     index signatures, build the result explicitly from validated
+     values. Schema-mismatch reason now names the offending field
+     (`TEL_UPDATE.confidence out of range or wrong type` instead of
+     generic). Folded into a `validateFields` helper + `FieldSpec`
+     table (DRY across TEL/VIS). `formatNumber` now uses
+     `!Number.isFinite` (pre-fix accepted `Infinity` through the
+     `Number.isNaN` guard).
+  4. `test(webapp): close S0.6 review test gaps (round 4)` — 47 → 95
+     tests (+48). New coverage: parseWsEnvelope rejection branches
+     (non-record, non-finite timestamp, integer/non-negative seq);
+     ws double-count guard (the round-1 fix locked in via test);
+     ws spurious-stop guard; ws lifecycle interactions (5 tests
+     including stop-during-reconnect cancels the timer, late
+     onmessage after stop, heartbeat-then-reconnect, onerror clears
+     heartbeat, setHeartbeatTimeoutMs after stop); parseTelUpdate
+     boundary tests (-1, 0, 1 inclusive; closed-shape strip);
+     asTelUpdate / asVisUpdate legacy wrappers; asWarningPayload
+     (5 cases); formatNumber non-finite handling; ErrorBoundary
+     handleReset; reducer extracted as a named export with 13 tests
+     (sticky-once schema-mismatch, WS_TRANSPORT_ERROR/RECOVERED
+     idempotence, STREAM_BATCH preservation); TrackingSummary
+     sparkline assertions tightened to parse y-coords as numbers
+     (was `toContain("0.00")` which matched almost any non-trivial
+     points string).
+  5. `fix(webapp): round-2 review residuals (round 5)` — second
+     review pass found 6 P1 + 10 P2 issues. P1 functional fixes:
+     (a) TelemetryPanel read raw `linkStatus.vis_fresh_s` while App
+     applied a 0.25 default, so on `vis_fresh_s = 0` the App-level
+     alert and the panel accent disagreed — pass `visFreshThresholdS`
+     as a prop; (b) `asLinkStatus` still had the index signature +
+     spread the round-3 commit claimed to close — applied the same
+     closed-shape treatment, added 4 tests; (c) `WebSocket`
+     constructor throw was silently swallowed (no transport event,
+     no log, no counter bump) — now reports a transport error and
+     bumps the counter; (d) `pendingBatchRef` not reset on WS
+     rebuild leaked stale (linkStatus, latestTel) into the new
+     session's first envelope — reset in cleanup; (e) `onerror`
+     didn't call `setConnected(false)` — UI stayed "WS Connected"
+     against a dead socket if browser dropped onclose; (f)
+     `validateFields` skip-undefined cleanup. Plus 18 new tests:
+     constructor-throw (with stubbed `ThrowingWebSocket`); JSON-parse
+     failure; seeded heartbeat; heartbeat-cycle abnormal_close
+     event assertion; `parseWsEnvelope` all 4 events; `parseVisUpdate`
+     closed-shape; per-spec rejections (loc_y, bound_w VIS,
+     tracking_state VIS, bound_h, target_y); `asLinkStatus`;
+     `heartbeatMsFromVisFresh` formula directly tested.
+  6. `fix(webapp): heartbeat actually recovers from dropped onclose
+     (round 6)` — third review pass found one residual. Round-5's
+     "leave heartbeat armed in onerror" was claimed as a fallback for
+     dropped onclose, but the watchdog body just called `ws.close()`
+     again — a documented no-op on a CLOSING socket — and `onclose`
+     dispatches no new event. So `scheduleReconnect` (only invoked
+     from onclose) never ran and the client stayed permanently
+     disconnected after a dropped onclose. Fix: heartbeat handler now
+     detects `errorAlreadyCounted` is still true at fire time and
+     forces the recovery state machine (null `this.ws`, setConnected
+     false, clear flag, scheduleReconnect). Replaced the previous
+     "timer count survives" tautology with a positive recovery test
+     (advance heartbeatTimeoutMs after onerror with no onclose,
+     assert reconnect timer pending, assert new socket constructed).
+- Final verification:
+  - `npm --prefix src/webapp run test` => `114 passed, 0 failed`
+    (initial S0.6 = 5 passing; +109 new across 7 test files).
+  - `npm --prefix src/webapp run build` clean (tsc --noEmit + vite).
+  - `python -m pre_commit run --all-files` clean.
+  - `python -m pytest tests/ -q` unchanged from `dev` baseline
+    (no Python touched): `144 passed, 1 skipped, 1 xfailed`.
+  - `cmake --build build -j` + `ctest` 5/5 unchanged (no C++ touched).
+- Manual smoke still pending at PR review: start backend, open webapp,
+  `kill -9 <backend>` → fallback panel within 2 s; restart → recovery
+  in 15 s ± jitter.
+- Files changed (cumulative across all 14 commits, vs `dev`):
+  - New: `src/webapp/src/components/ErrorBoundary.tsx` + tests,
+    `src/webapp/src/types.test.ts`, `src/webapp/src/ws.test.ts`,
+    `src/webapp/src/components/TrackingSummary.test.tsx`,
+    `src/webapp/src/components/TelemetryPanel.test.tsx`,
+    `src/webapp/src/App.reducer.test.ts`.
+  - Modified: `src/webapp/src/main.tsx`, `App.tsx`, `types.ts`,
+    `ws.ts`, `styles.css`, `components/TrackingSummary.tsx`,
+    `components/TelemetryPanel.tsx`, `docs/development_plan.md`,
+    `docs/message-spec.md` (no — not touched in S0.6).
+- Process notes captured for future review loops:
+  - Three parallel review subagents with non-overlapping scopes
+    (security+robustness / test gaps / quality+performance) gave
+    higher signal density than one comprehensive review and surfaced
+    the same critical issues from different angles. Strong overlap
+    = strong evidence.
+  - Hand-rolled FakeWebSocket on `globalThis` + `vi.useFakeTimers()`
+    is sufficient for ws-lifecycle tests; no `jsdom` /
+    `@testing-library/react` needed. `react-dom/server`
+    `renderToString` covers component-render assertions.
+  - When stubbing `globalThis.WebSocket`, the next test's
+    `installFakeWebSocket()` in `beforeEach` correctly replaces the
+    stub via direct assignment — no `vi.restoreAllMocks` needed.
+  - "Tautological tests" (assertion that passes for the wrong reason
+    via short-circuit on a nulled listener slot) were caught only on
+    the third iteration. Reviewers should specifically verify each
+    new test fails when the production code is broken.
+- Out of scope (still deferred):
+  - ADR-007 confidence-semantics doc — separate docs PR.
+  - Env-var inventory in `setup.md` (still 9+ vars).
+  - TRACKING-side miss-grace symmetric to TARGET_DETECTED.
+  - `vision/main.py` LOGGER-vs-print sweep.
+  - Webapp polish (S0.22) — explicitly P2.
+  - Pre-existing nits flagged by reviewers but unrelated to S0.6:
+    duplicate `clampNumber`/`clamp` in `utils/format.ts` vs
+    `utils/overlayMath.ts`; `derivedAlerts` `useMemo` mutating a ref
+    during render; `selectedTracking` `useMemo` deps-incomplete.
+- Next session: open the PR for review (gh CLI not authed locally —
+  manual URL: `https://github.com/Eddi-Xie/AOT_DRONE/pull/new/chore/sprint0-webapp-software`).
+  After merge, S0.7 (HIL bench scaffold) on `chore/sprint0-hil-bench`.
+  S0.7 unblocks the deferred Manual+arm:true ordering fix from S0.4
+  (per ADR-004).
+
 ### (future entries here)
