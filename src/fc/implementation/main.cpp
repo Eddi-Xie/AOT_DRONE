@@ -6,6 +6,8 @@
 #include "RcMath.h"
 #include "TelemetryPublisher.h"
 
+#include <arpa/inet.h>
+
 #include <algorithm>
 #include <atomic>
 #include <charconv>
@@ -200,6 +202,21 @@ int main() {
     const char* fc_tel_host_env = std::getenv("FC_TEL_HOST");
     const std::string fc_tel_host =
         (fc_tel_host_env && *fc_tel_host_env) ? std::string(fc_tel_host_env) : "127.0.0.1";
+    {
+        // TelemetryPublisher's UDP send path uses inet_pton internally and
+        // will silently fail on a hostname like "localhost". Validate up-
+        // front with the same rule so the error message points at the
+        // operator-facing config knob instead of "Failed to init UDP
+        // telemetry publisher" with no further explanation.
+        sockaddr_in probe{};
+        if (inet_pton(AF_INET, fc_tel_host.c_str(), &probe.sin_addr) != 1) {
+            std::cerr << "[FC] Invalid FC_TEL_HOST='" << fc_tel_host
+                      << "', refusing to start (use a dotted-quad IPv4 literal "
+                         "such as 127.0.0.1, or 0.0.0.0; hostnames are not resolved)\n";
+            command_server.stop();
+            return 1;
+        }
+    }
 
     const char* fc_tel_port_env = std::getenv("FC_TEL_PORT");
     int fc_tel_port = static_cast<int>(proto::UDP_TEL_PORT);
@@ -325,11 +342,16 @@ int main() {
                       << "s); entering LandSafely failsafe\n";
         } else if (!stale_now && failsafe_engaged) {
             failsafe_engaged = false;
-            // Don't auto-resume the prior mode — operator confirms recovery
-            // by sending a fresh CMD with desired_mode set explicitly. Auto-
-            // resume is part of the deferred two-stage state machine (S0.7).
+            // Clear the latch only — don't auto-resume any prior mode. A
+            // fresh CMD earlier in this same tick may have already updated
+            // the control mode (the CMD-application block above runs
+            // before this stale check); otherwise the controller stays in
+            // whatever mode it's currently in (typically LandSafely from
+            // the entry-side branch). Auto-resume of a saved pre-failsafe
+            // mode is the deferred two-stage state machine in S0.7.
             std::cerr << "[FC] CMD link recovered (age=" << cmd_age_s
-                      << "s); staying in LandSafely until next CMD\n";
+                      << "s); cleared failsafe latch; mode unchanged unless a CMD already applied "
+                         "this tick\n";
         }
 
         (void)flight_controller.updateTimeStep(dt);
