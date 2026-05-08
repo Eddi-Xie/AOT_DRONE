@@ -55,6 +55,7 @@ interface AppState {
   intentFeedbackKind: IntentFeedbackKind;
   intentFeedbackMessage: string;
   schemaMismatchDetail: string | null;
+  wsConsecutiveErrors: number;
 }
 
 interface PendingStreamBatch {
@@ -108,6 +109,8 @@ type AppAction =
     }
   | { type: "CLEAR_WARNINGS" }
   | { type: "SCHEMA_MISMATCH_DETECTED"; detail: string }
+  | { type: "WS_TRANSPORT_ERROR"; consecutiveErrors: number }
+  | { type: "WS_TRANSPORT_RECOVERED" }
   | { type: "SET_SELECTED_MODE"; mode: ControlMode }
   | { type: "SET_ARMED"; armed: boolean }
   | { type: "INTENT_PENDING"; message: string }
@@ -134,6 +137,7 @@ const INITIAL_STATE: AppState = {
   intentFeedbackKind: "idle",
   intentFeedbackMessage: "Ready.",
   schemaMismatchDetail: null,
+  wsConsecutiveErrors: 0,
 };
 
 function normalizeConfidenceSample(value: number | null): number {
@@ -288,6 +292,22 @@ function reducer(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         schemaMismatchDetail: action.detail,
+      };
+    case "WS_TRANSPORT_ERROR":
+      if (state.wsConsecutiveErrors === action.consecutiveErrors) {
+        return state;
+      }
+      return {
+        ...state,
+        wsConsecutiveErrors: action.consecutiveErrors,
+      };
+    case "WS_TRANSPORT_RECOVERED":
+      if (state.wsConsecutiveErrors === 0) {
+        return state;
+      }
+      return {
+        ...state,
+        wsConsecutiveErrors: 0,
       };
     case "SET_SELECTED_MODE":
       return {
@@ -449,9 +469,15 @@ export default function App(): JSX.Element {
         : undefined,
       onConnectionChange: (connected) => {
         dispatch({ type: "WS_CONNECTION_CHANGED", connected });
+        if (connected) {
+          dispatch({ type: "WS_TRANSPORT_RECOVERED" });
+        }
       },
       onEnvelope: (envelope) => {
         handleParsedEnvelope(envelope);
+      },
+      onTransportEvent: (event) => {
+        dispatch({ type: "WS_TRANSPORT_ERROR", consecutiveErrors: event.consecutiveErrors });
       },
       minBackoffMs: 500,
     });
@@ -659,6 +685,16 @@ export default function App(): JSX.Element {
       });
     }
 
+    // 3+ consecutive transport failures = the backend is unreachable
+    // beyond a transient blip. Surface immediately; clears on next onopen.
+    if (state.wsConsecutiveErrors >= 3) {
+      alerts.push({
+        id: "ws-transport-errors",
+        detail: `WS transport unstable (${state.wsConsecutiveErrors} consecutive errors).`,
+        severity: "error",
+      });
+    }
+
     return alerts.slice(0, 5);
   }, [
     nowMs,
@@ -667,6 +703,7 @@ export default function App(): JSX.Element {
     state.linkStatus?.fc_connected,
     state.schemaMismatchDetail,
     state.wsConnected,
+    state.wsConsecutiveErrors,
     trackingBlockedReason,
     telFreshThresholdS,
     visFreshThresholdS,

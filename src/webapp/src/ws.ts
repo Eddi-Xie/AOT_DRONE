@@ -1,5 +1,17 @@
 import { WsEnvelope, WsEventType, isRecord } from "./types";
 
+export interface WsTransportEvent {
+  kind: "error" | "abnormal_close";
+  url: string;
+  timestampMs: number;
+  // Present on close events; absent for "error" since onerror gives us no code.
+  code?: number;
+  // Total consecutive transport failures observed since the last clean
+  // onopen. Lets the App surface a derived alert after a configurable
+  // threshold (S0.6 item B3 = 3).
+  consecutiveErrors: number;
+}
+
 const WS_EVENTS: WsEventType[] = ["TEL_UPDATE", "VIS_UPDATE", "LINK_STATUS", "WARNING"];
 
 function isWsEventType(value: unknown): value is WsEventType {
@@ -63,6 +75,13 @@ interface ReconnectingWsClientOptions {
    * `vis_fresh_s` is known so the watchdog tracks the actual stream cadence.
    */
   heartbeatTimeoutMs?: number;
+  /**
+   * Notified on every onerror or abnormal close (close.code !== 1000).
+   * Receives a `consecutiveErrors` counter that resets on the next clean
+   * onopen — so the App can decide to escalate to a derived warning after
+   * N back-to-back failures.
+   */
+  onTransportEvent?: (event: WsTransportEvent) => void;
 }
 
 export class ReconnectingWsClient {
@@ -81,6 +100,8 @@ export class ReconnectingWsClient {
   private connected = false;
   private heartbeatTimeoutMs: number;
   private heartbeatTimerId: number | null = null;
+  private readonly onTransportEvent: ((event: WsTransportEvent) => void) | undefined;
+  private consecutiveErrors = 0;
 
   constructor(options: ReconnectingWsClientOptions) {
     this.url = options.url;
@@ -93,6 +114,7 @@ export class ReconnectingWsClient {
       : undefined;
     this.rng = options.rng ?? Math.random;
     this.heartbeatTimeoutMs = options.heartbeatTimeoutMs ?? 1000;
+    this.onTransportEvent = options.onTransportEvent;
     this.reconnectDelayMs = this.minBackoffMs;
   }
 
@@ -143,6 +165,7 @@ export class ReconnectingWsClient {
 
     this.ws.onopen = () => {
       this.reconnectDelayMs = this.minBackoffMs;
+      this.consecutiveErrors = 0;
       this.setConnected(true);
       this.armHeartbeat();
     };
@@ -153,13 +176,37 @@ export class ReconnectingWsClient {
     };
 
     this.ws.onerror = () => {
+      this.consecutiveErrors += 1;
+      const payload: WsTransportEvent = {
+        kind: "error",
+        url: this.url,
+        timestampMs: Date.now(),
+        consecutiveErrors: this.consecutiveErrors,
+      };
+      console.error("[ReconnectingWsClient] transport error", payload);
+      this.onTransportEvent?.(payload);
       if (this.ws !== null) {
         this.ws.close();
       }
     };
 
-    this.ws.onclose = () => {
+    this.ws.onclose = (event: CloseEvent) => {
       this.clearHeartbeatTimer();
+      const code = typeof event?.code === "number" ? event.code : undefined;
+      // Code 1000 is the normal closure (e.g. our own stop()). Anything else
+      // is an abnormal close worth surfacing.
+      if (code !== 1000) {
+        this.consecutiveErrors += 1;
+        const payload: WsTransportEvent = {
+          kind: "abnormal_close",
+          url: this.url,
+          timestampMs: Date.now(),
+          code,
+          consecutiveErrors: this.consecutiveErrors,
+        };
+        console.error("[ReconnectingWsClient] abnormal close", payload);
+        this.onTransportEvent?.(payload);
+      }
       this.ws = null;
       this.setConnected(false);
       if (this.active) {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ReconnectingWsClient, parseWsEnvelope } from "./ws";
+import { ReconnectingWsClient, parseWsEnvelope, WsTransportEvent } from "./ws";
 
 // Minimal hand-rolled WebSocket fake. We expose handles so tests can drive
 // the lifecycle (open / message / error / close) deterministically.
@@ -45,6 +45,9 @@ function lastInstance(): FakeWebSocketHandle {
 beforeEach(() => {
   installFakeWebSocket();
   vi.useFakeTimers();
+  // Silence the production console.error logs during tests (they are exercised
+  // explicitly in the transport-error block and would otherwise spam output).
+  vi.spyOn(console, "error").mockImplementation(() => undefined);
 });
 
 afterEach(() => {
@@ -67,6 +70,103 @@ describe("parseWsEnvelope", () => {
 
   it("rejects unknown events", () => {
     expect(parseWsEnvelope({ event: "WAT", data: {}, timestamp_s: 0, seq: 0 })).toBeNull();
+  });
+});
+
+describe("ReconnectingWsClient — transport-error reporting", () => {
+  it("emits onTransportEvent on onerror with kind=error and increments counter", () => {
+    const events: WsTransportEvent[] = [];
+
+    const client = new ReconnectingWsClient({
+      url: "ws://test",
+      onEnvelope: () => {},
+      onConnectionChange: () => {},
+      onTransportEvent: (e) => events.push(e),
+      rng: () => 0.5,
+    });
+    client.start();
+    const inst = lastInstance();
+
+    inst.onerror?.(new Event("error"));
+    inst.onerror?.(new Event("error"));
+    inst.onerror?.(new Event("error"));
+
+    expect(events.map((e) => e.kind)).toEqual(["error", "error", "error"]);
+    expect(events.map((e) => e.consecutiveErrors)).toEqual([1, 2, 3]);
+    expect(events[0].url).toBe("ws://test");
+    expect(typeof events[0].timestampMs).toBe("number");
+    expect(console.error).toHaveBeenCalled();
+
+    client.stop();
+  });
+
+  it("emits onTransportEvent on abnormal close (code != 1000)", () => {
+    const events: WsTransportEvent[] = [];
+
+    const client = new ReconnectingWsClient({
+      url: "ws://test",
+      onEnvelope: () => {},
+      onConnectionChange: () => {},
+      onTransportEvent: (e) => events.push(e),
+      rng: () => 0.5,
+    });
+    client.start();
+    const inst = lastInstance();
+
+    inst.onclose?.({ code: 1006 } as CloseEvent);
+
+    expect(events).toHaveLength(1);
+    expect(events[0].kind).toBe("abnormal_close");
+    expect(events[0].code).toBe(1006);
+    expect(events[0].consecutiveErrors).toBe(1);
+
+    client.stop();
+  });
+
+  it("does NOT emit on a clean close (code 1000)", () => {
+    const events: WsTransportEvent[] = [];
+    const client = new ReconnectingWsClient({
+      url: "ws://test",
+      onEnvelope: () => {},
+      onConnectionChange: () => {},
+      onTransportEvent: (e) => events.push(e),
+      rng: () => 0.5,
+    });
+    client.start();
+    const inst = lastInstance();
+    inst.onclose?.({ code: 1000 } as CloseEvent);
+    expect(events).toEqual([]);
+    client.stop();
+  });
+
+  it("resets the consecutive-error counter on the next onopen", () => {
+    const events: WsTransportEvent[] = [];
+
+    const client = new ReconnectingWsClient({
+      url: "ws://test",
+      onEnvelope: () => {},
+      onConnectionChange: () => {},
+      onTransportEvent: (e) => events.push(e),
+      rng: () => 0.5,
+    });
+    client.start();
+
+    // Two errors then a successful open.
+    lastInstance().onerror?.(new Event("error"));
+    lastInstance().onerror?.(new Event("error"));
+    expect(events[1].consecutiveErrors).toBe(2);
+
+    // Reconnect cycle: onclose pumps reconnect; new socket opens.
+    lastInstance().onclose?.(new Event("close") as CloseEvent);
+    vi.runOnlyPendingTimers();
+    lastInstance().onopen?.(new Event("open"));
+
+    // A subsequent error should restart the counter at 1.
+    lastInstance().onerror?.(new Event("error"));
+    const last = events[events.length - 1];
+    expect(last.consecutiveErrors).toBe(1);
+
+    client.stop();
   });
 });
 
