@@ -439,6 +439,8 @@ export default function App(): JSX.Element {
     [overlaySource, scheduleFlush],
   );
 
+  const wsClientRef = useRef<ReconnectingWsClient | null>(null);
+
   useEffect(() => {
     const wsClient = new ReconnectingWsClient({
       url: backendConfig.wsUrl,
@@ -452,18 +454,31 @@ export default function App(): JSX.Element {
         handleParsedEnvelope(envelope);
       },
       minBackoffMs: 500,
-      maxBackoffMs: 5000,
     });
 
+    wsClientRef.current = wsClient;
     wsClient.start();
 
     return () => {
       wsClient.stop();
+      wsClientRef.current = null;
       if (frameIdRef.current !== null) {
         window.cancelAnimationFrame(frameIdRef.current);
       }
     };
   }, [backendConfig.wsUrl, backendConfig.apiToken, handleParsedEnvelope]);
+
+  // Track vision-stream cadence: heartbeat = 2 * vis_fresh_s + 0.5 s. If we
+  // don't see ANY frame for that long the socket is silently broken; force
+  // a close so the reconnect path fires.
+  const visFreshFromLink = readNumber(state.linkStatus?.vis_fresh_s);
+  useEffect(() => {
+    if (wsClientRef.current === null || visFreshFromLink === null || visFreshFromLink <= 0) {
+      return;
+    }
+    const heartbeatMs = (2 * visFreshFromLink + 0.5) * 1000;
+    wsClientRef.current.setHeartbeatTimeoutMs(heartbeatMs);
+  }, [visFreshFromLink]);
 
   useEffect(() => {
     const timerId = window.setInterval(() => {

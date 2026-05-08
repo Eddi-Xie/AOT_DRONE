@@ -184,6 +184,96 @@ describe("ReconnectingWsClient — backoff jitter + ceiling", () => {
     client.stop();
   });
 
+  it("heartbeat fires close() when no message arrives within the timeout", () => {
+    const client = new ReconnectingWsClient({
+      url: "ws://test",
+      onEnvelope: () => {},
+      onConnectionChange: () => {},
+      heartbeatTimeoutMs: 500,
+      rng: () => 0.5,
+    });
+    client.start();
+    const inst = lastInstance();
+    inst.onopen?.(new Event("open"));
+
+    expect(inst.close).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(499);
+    expect(inst.close).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(2);
+    expect(inst.close).toHaveBeenCalledTimes(1);
+
+    client.stop();
+  });
+
+  it("heartbeat is reset by every onmessage so a steady stream stays connected", () => {
+    const client = new ReconnectingWsClient({
+      url: "ws://test",
+      onEnvelope: () => {},
+      onConnectionChange: () => {},
+      heartbeatTimeoutMs: 500,
+      rng: () => 0.5,
+    });
+    client.start();
+    const inst = lastInstance();
+    inst.onopen?.(new Event("open"));
+
+    for (let frame = 0; frame < 10; frame += 1) {
+      vi.advanceTimersByTime(400); // less than timeout
+      inst.onmessage?.({ data: '{"event":"WARNING","data":{},"timestamp_s":0,"seq":0}' } as MessageEvent);
+    }
+
+    expect(inst.close).not.toHaveBeenCalled();
+    client.stop();
+  });
+
+  it("setHeartbeatTimeoutMs reconfigures an active watchdog", () => {
+    const client = new ReconnectingWsClient({
+      url: "ws://test",
+      onEnvelope: () => {},
+      onConnectionChange: () => {},
+      heartbeatTimeoutMs: 5000,
+      rng: () => 0.5,
+    });
+    client.start();
+    const inst = lastInstance();
+    inst.onopen?.(new Event("open"));
+
+    // Tighten the watchdog mid-stream.
+    client.setHeartbeatTimeoutMs(200);
+    vi.advanceTimersByTime(199);
+    expect(inst.close).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(2);
+    expect(inst.close).toHaveBeenCalledTimes(1);
+
+    client.stop();
+  });
+
+  it("setHeartbeatTimeoutMs ignores non-positive / non-finite values", () => {
+    const client = new ReconnectingWsClient({
+      url: "ws://test",
+      onEnvelope: () => {},
+      onConnectionChange: () => {},
+      heartbeatTimeoutMs: 1000,
+      rng: () => 0.5,
+    });
+    client.start();
+    const inst = lastInstance();
+    inst.onopen?.(new Event("open"));
+
+    client.setHeartbeatTimeoutMs(0);
+    client.setHeartbeatTimeoutMs(-50);
+    client.setHeartbeatTimeoutMs(Number.NaN);
+    client.setHeartbeatTimeoutMs(Number.POSITIVE_INFINITY);
+
+    // Original 1000 ms remains.
+    vi.advanceTimersByTime(999);
+    expect(inst.close).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(2);
+    expect(inst.close).toHaveBeenCalledTimes(1);
+
+    client.stop();
+  });
+
   it("backoff resets to minBackoffMs after a successful onopen", () => {
     const setTimeoutSpy = vi.spyOn(globalThis, "setTimeout");
     const client = new ReconnectingWsClient({

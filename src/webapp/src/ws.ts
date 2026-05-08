@@ -57,6 +57,12 @@ interface ReconnectingWsClientOptions {
    * Tests inject a deterministic generator.
    */
   rng?: () => number;
+  /**
+   * Force-close + reconnect when no message has arrived in this many ms.
+   * Default 1000. The owning App should call `setHeartbeatTimeoutMs` once
+   * `vis_fresh_s` is known so the watchdog tracks the actual stream cadence.
+   */
+  heartbeatTimeoutMs?: number;
 }
 
 export class ReconnectingWsClient {
@@ -73,6 +79,8 @@ export class ReconnectingWsClient {
   private reconnectDelayMs: number;
   private active = false;
   private connected = false;
+  private heartbeatTimeoutMs: number;
+  private heartbeatTimerId: number | null = null;
 
   constructor(options: ReconnectingWsClientOptions) {
     this.url = options.url;
@@ -84,7 +92,18 @@ export class ReconnectingWsClient {
       ? [...options.subprotocols]
       : undefined;
     this.rng = options.rng ?? Math.random;
+    this.heartbeatTimeoutMs = options.heartbeatTimeoutMs ?? 1000;
     this.reconnectDelayMs = this.minBackoffMs;
+  }
+
+  setHeartbeatTimeoutMs(timeoutMs: number): void {
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      return;
+    }
+    this.heartbeatTimeoutMs = timeoutMs;
+    if (this.heartbeatTimerId !== null) {
+      this.armHeartbeat();
+    }
   }
 
   start(): void {
@@ -98,6 +117,7 @@ export class ReconnectingWsClient {
   stop(): void {
     this.active = false;
     this.clearReconnectTimer();
+    this.clearHeartbeatTimer();
     if (this.ws !== null) {
       this.ws.close();
       this.ws = null;
@@ -124,9 +144,11 @@ export class ReconnectingWsClient {
     this.ws.onopen = () => {
       this.reconnectDelayMs = this.minBackoffMs;
       this.setConnected(true);
+      this.armHeartbeat();
     };
 
     this.ws.onmessage = (event: MessageEvent<unknown>) => {
+      this.armHeartbeat();
       this.handleMessage(event.data);
     };
 
@@ -137,6 +159,7 @@ export class ReconnectingWsClient {
     };
 
     this.ws.onclose = () => {
+      this.clearHeartbeatTimer();
       this.ws = null;
       this.setConnected(false);
       if (this.active) {
@@ -206,6 +229,25 @@ export class ReconnectingWsClient {
 
     clearTimeout(this.reconnectTimerId);
     this.reconnectTimerId = null;
+  }
+
+  private armHeartbeat(): void {
+    this.clearHeartbeatTimer();
+    this.heartbeatTimerId = setTimeout(() => {
+      this.heartbeatTimerId = null;
+      // Force-close the silent socket; onclose will schedule reconnect.
+      if (this.ws !== null) {
+        this.ws.close();
+      }
+    }, this.heartbeatTimeoutMs) as unknown as number;
+  }
+
+  private clearHeartbeatTimer(): void {
+    if (this.heartbeatTimerId === null) {
+      return;
+    }
+    clearTimeout(this.heartbeatTimerId);
+    this.heartbeatTimerId = null;
   }
 
   private setConnected(nextConnected: boolean): void {
