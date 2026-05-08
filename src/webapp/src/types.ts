@@ -53,6 +53,11 @@ export interface LinkStatus {
   [key: string]: unknown;
 }
 
+// Closed-shape: only the listed fields are part of the contract. Removing
+// the [key: string]: unknown index signature means downstream code that
+// reads an unknown field gets a compile error rather than silently flowing
+// unvalidated data from the wire. To add a new field: define it here AND
+// add a guard in parseTelUpdate / parseVisUpdate below.
 export interface TelUpdate {
   type?: string;
   seq?: number;
@@ -70,7 +75,6 @@ export interface TelUpdate {
   cmd_age_s?: number;
   rx_monotonic_s?: number | null;
   tel_age_s?: number | null;
-  [key: string]: unknown;
 }
 
 export interface VisUpdate {
@@ -85,7 +89,6 @@ export interface VisUpdate {
   confidence?: number;
   rx_monotonic_s?: number | null;
   vis_age_s?: number | null;
-  [key: string]: unknown;
 }
 
 export interface WarningPayload {
@@ -186,7 +189,10 @@ export function formatNumber(
   digits = 2,
   suffix = "",
 ): string {
-  if (value === null || value === undefined || Number.isNaN(value)) {
+  // !isFinite catches NaN, +Infinity and -Infinity; previously only NaN
+  // was caught, which meant a backend emitting Infinity rendered the
+  // literal string "Infinity m" instead of n/a.
+  if (value === null || value === undefined || !Number.isFinite(value)) {
     return "n/a";
   }
   return `${value.toFixed(digits)}${suffix}`;
@@ -254,78 +260,121 @@ const CONTROL_MODE_VALUES = new Set<number>([
   ControlMode.Takeoff,
 ]);
 
+// Returns either { value, ok: true } when the field is absent or a valid
+// number in [min, max], or { ok: false } when the field is present-but-bad.
+// Absent (undefined) is NOT a mismatch — the wire schema makes most fields
+// optional. null IS a mismatch for non-nullable fields (callers route null
+// through readNullableNumber explicitly).
 function readBoundedNumber(
   value: unknown,
   min: number,
   max: number,
-): { value: number | null; outOfRange: boolean } {
+):
+  | { ok: true; value: number | undefined }
+  | { ok: false } {
   if (value === undefined) {
-    return { value: null, outOfRange: false };
+    return { ok: true, value: undefined };
   }
   const parsed = readNumber(value);
-  if (parsed === null) {
-    return { value: null, outOfRange: true };
+  if (parsed === null || parsed < min || parsed > max) {
+    return { ok: false };
   }
-  if (parsed < min || parsed > max) {
-    return { value: null, outOfRange: true };
-  }
-  return { value: parsed, outOfRange: false };
+  return { ok: true, value: parsed };
 }
 
 function readEnumNumber(
   value: unknown,
   allowed: Set<number>,
-): { value: number | null; outOfRange: boolean } {
+):
+  | { ok: true; value: number | undefined }
+  | { ok: false } {
   if (value === undefined) {
-    return { value: null, outOfRange: false };
+    return { ok: true, value: undefined };
   }
   const parsed = readNumber(value);
   if (parsed === null || !allowed.has(parsed)) {
-    return { value: null, outOfRange: true };
+    return { ok: false };
   }
-  return { value: parsed, outOfRange: false };
+  return { ok: true, value: parsed };
 }
+
+// Validate a TEL or VIS field-by-field. Returns the first failing field
+// name (so the App-level alert can surface a diagnosable hint) or null on
+// success. Side-effect-free — fills the `out` record only when ok=true on
+// every field.
+type FieldSpec =
+  | { kind: "bounded"; key: string; min: number; max: number }
+  | { kind: "enum"; key: string; allowed: Set<number> };
+
+function validateFields(
+  source: Record<string, unknown>,
+  out: Record<string, number | undefined>,
+  specs: readonly FieldSpec[],
+): string | null {
+  for (const spec of specs) {
+    const raw = source[spec.key];
+    const result =
+      spec.kind === "bounded"
+        ? readBoundedNumber(raw, spec.min, spec.max)
+        : readEnumNumber(raw, spec.allowed);
+    if (!result.ok) {
+      return spec.key;
+    }
+    out[spec.key] = result.value;
+  }
+  return null;
+}
+
+const TEL_FIELD_SPECS: readonly FieldSpec[] = [
+  { kind: "bounded", key: "target_x", min: -1, max: 1 },
+  { kind: "bounded", key: "target_y", min: -1, max: 1 },
+  { kind: "bounded", key: "bound_w", min: 0, max: 1 },
+  { kind: "bounded", key: "bound_h", min: 0, max: 1 },
+  { kind: "bounded", key: "confidence", min: 0, max: 1 },
+  { kind: "enum", key: "tracking_state", allowed: TRACKING_STATE_VALUES },
+  { kind: "enum", key: "control_mode", allowed: CONTROL_MODE_VALUES },
+];
+
+const VIS_FIELD_SPECS: readonly FieldSpec[] = [
+  { kind: "bounded", key: "loc_x", min: -1, max: 1 },
+  { kind: "bounded", key: "loc_y", min: -1, max: 1 },
+  { kind: "bounded", key: "bound_w", min: 0, max: 1 },
+  { kind: "bounded", key: "bound_h", min: 0, max: 1 },
+  { kind: "bounded", key: "confidence", min: 0, max: 1 },
+  { kind: "enum", key: "tracking_state", allowed: TRACKING_STATE_VALUES },
+];
 
 export function parseTelUpdate(value: unknown): ParsedUpdate<TelUpdate> {
   if (!isRecord(value)) {
     return { value: null, mismatch: null };
   }
 
-  const targetX = readBoundedNumber(value.target_x, -1, 1);
-  const targetY = readBoundedNumber(value.target_y, -1, 1);
-  const boundW = readBoundedNumber(value.bound_w, 0, 1);
-  const boundH = readBoundedNumber(value.bound_h, 0, 1);
-  const confidence = readBoundedNumber(value.confidence, 0, 1);
-  const trackingState = readEnumNumber(value.tracking_state, TRACKING_STATE_VALUES);
-  const controlMode = readEnumNumber(value.control_mode, CONTROL_MODE_VALUES);
-
-  if (
-    targetX.outOfRange ||
-    targetY.outOfRange ||
-    boundW.outOfRange ||
-    boundH.outOfRange ||
-    confidence.outOfRange ||
-    trackingState.outOfRange ||
-    controlMode.outOfRange
-  ) {
-    return { value: null, mismatch: "TEL_UPDATE field out of range or wrong type" };
+  const validated: Record<string, number | undefined> = {};
+  const failingField = validateFields(value, validated, TEL_FIELD_SPECS);
+  if (failingField !== null) {
+    return {
+      value: null,
+      mismatch: `TEL_UPDATE.${failingField} out of range or wrong type`,
+    };
   }
 
+  // Build the result from scratch — only the documented fields make it
+  // through. Any extra keys on the wire are dropped, closing a leak where
+  // unvalidated data could reach a future consumer.
   const tel: TelUpdate = {
-    ...value,
     type: readString(value.type) ?? undefined,
     seq: readNumber(value.seq) ?? undefined,
     timestamp_s: readNumber(value.timestamp_s) ?? undefined,
-    control_mode: controlMode.value ?? undefined,
-    tracking_state: trackingState.value ?? undefined,
+    control_mode: validated.control_mode,
+    tracking_state: validated.tracking_state,
     distFront_m: readNumber(value.distFront_m) ?? undefined,
     distBack_m: readNumber(value.distBack_m) ?? undefined,
     distBottom_m: readNumber(value.distBottom_m) ?? undefined,
-    target_x: targetX.value ?? undefined,
-    target_y: targetY.value ?? undefined,
-    bound_w: boundW.value ?? undefined,
-    bound_h: boundH.value ?? undefined,
-    confidence: confidence.value ?? undefined,
+    target_x: validated.target_x,
+    target_y: validated.target_y,
+    bound_w: validated.bound_w,
+    bound_h: validated.bound_h,
+    confidence: validated.confidence,
     cmd_age_s: readNumber(value.cmd_age_s) ?? undefined,
     rx_monotonic_s: readNullableNumber(value.rx_monotonic_s),
     tel_age_s: readNullableNumber(value.tel_age_s),
@@ -339,35 +388,25 @@ export function parseVisUpdate(value: unknown): ParsedUpdate<VisUpdate> {
     return { value: null, mismatch: null };
   }
 
-  const locX = readBoundedNumber(value.loc_x, -1, 1);
-  const locY = readBoundedNumber(value.loc_y, -1, 1);
-  const boundW = readBoundedNumber(value.bound_w, 0, 1);
-  const boundH = readBoundedNumber(value.bound_h, 0, 1);
-  const confidence = readBoundedNumber(value.confidence, 0, 1);
-  const trackingState = readEnumNumber(value.tracking_state, TRACKING_STATE_VALUES);
-
-  if (
-    locX.outOfRange ||
-    locY.outOfRange ||
-    boundW.outOfRange ||
-    boundH.outOfRange ||
-    confidence.outOfRange ||
-    trackingState.outOfRange
-  ) {
-    return { value: null, mismatch: "VIS_UPDATE field out of range or wrong type" };
+  const validated: Record<string, number | undefined> = {};
+  const failingField = validateFields(value, validated, VIS_FIELD_SPECS);
+  if (failingField !== null) {
+    return {
+      value: null,
+      mismatch: `VIS_UPDATE.${failingField} out of range or wrong type`,
+    };
   }
 
   const vis: VisUpdate = {
-    ...value,
     type: readString(value.type) ?? undefined,
     seq: readNumber(value.seq) ?? undefined,
     timestamp_s: readNumber(value.timestamp_s) ?? undefined,
-    tracking_state: trackingState.value ?? undefined,
-    loc_x: locX.value ?? undefined,
-    loc_y: locY.value ?? undefined,
-    bound_w: boundW.value ?? undefined,
-    bound_h: boundH.value ?? undefined,
-    confidence: confidence.value ?? undefined,
+    tracking_state: validated.tracking_state,
+    loc_x: validated.loc_x,
+    loc_y: validated.loc_y,
+    bound_w: validated.bound_w,
+    bound_h: validated.bound_h,
+    confidence: validated.confidence,
     rx_monotonic_s: readNullableNumber(value.rx_monotonic_s),
     vis_age_s: readNullableNumber(value.vis_age_s),
   };
