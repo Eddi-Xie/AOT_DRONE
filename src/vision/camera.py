@@ -87,6 +87,15 @@ class CameraSource:
     def src_label(self) -> str:
         return self.spec.label
 
+    @property
+    def is_live(self) -> bool:
+        """True for sources where a False from read() is a transient blip
+        rather than a terminal EOF. Webcams and (future) RTSP streams are
+        live; recorded files are not. Drives main.py's "retry vs terminate"
+        decision when read() returns False.
+        """
+        return self.spec.kind == "webcam"
+
     def _open_capture(self, spec: SourceSpec) -> Any:
         import cv2
 
@@ -106,6 +115,14 @@ class CameraSource:
             self._next_backoff_s = self._reconnect_initial_s
             return True, frame
 
+        # File sources: a False from read() means EOF, which is a normal
+        # termination — don't try to reconnect. The caller still gets
+        # (False, None) so its existing break-on-EOF behaviour is preserved.
+        # Reconnect only makes sense for live sources (webcam, future RTSP)
+        # where a False is a transient driver/network blip.
+        if self.spec.kind != "webcam":
+            return False, None
+
         # Empty / False inside the post-open warmup window: tolerate it as a
         # "the camera driver is still settling" signal without tearing down
         # the capture. Returns False so the caller skips this frame and
@@ -119,12 +136,13 @@ class CameraSource:
             )
             return False, None
 
-        # Genuine read failure: try ONE release+reopen with the current
-        # backoff. Returns False if the reopen fails or the post-open read
-        # is empty; the caller is expected to call read() again on the next
-        # tick, which will retry with a doubled backoff. Putting the loop
-        # outside read() keeps the call non-blocking from the main loop's
-        # perspective — long-tail failures don't stall the caller indefinitely.
+        # Genuine read failure on a live source: try ONE release+reopen with
+        # the current backoff. Returns False if the reopen fails or the
+        # post-open read is empty; the caller is expected to call read()
+        # again on the next tick, which will retry with a doubled backoff.
+        # Putting the loop outside read() keeps the call non-blocking from
+        # the main loop's perspective — long-tail failures don't stall the
+        # caller indefinitely.
         return self._attempt_one_reconnect()
 
     def _attempt_one_reconnect(self) -> tuple[bool, np.ndarray | None]:

@@ -361,14 +361,61 @@ def run_loop(
     emitted_count = 0
     vis_seq = 1
 
+    # Black-frame detection state: warn after N consecutive frames with
+    # variance below the threshold. Reset on the first non-low-var frame.
+    # The variance threshold (1.0) is well below any natural-image variance
+    # but above pure-zero or single-uniform-colour frames, which is the
+    # signature of a webcam producing all-black or stuck frames.
+    _BLACK_FRAME_VAR_THRESHOLD = 1.0
+    _BLACK_FRAME_WARN_AFTER = 30
+    consecutive_black_frames = 0
+    black_frame_warn_emitted = False
+
     try:
         while True:
             ok, frame = source.read()
             if not ok or frame is None:
+                # Live sources (webcam/RTSP): trust the source's reconnect
+                # logic — a False here is either a transient failure that's
+                # already in the backoff window or a post-open black-frame
+                # grace tick. Sleep briefly to avoid tight-looping during
+                # the grace window (during reconnect, the source itself
+                # sleeps).
+                # Recorded sources (file): EOF is terminal; the loop ends.
+                # Use getattr so test fakes that don't expose `is_live`
+                # default to terminal-on-False semantics, preserving the
+                # legacy break behaviour.
+                if getattr(source, "is_live", False):
+                    time.sleep(0.01)
+                    continue
                 break
 
             frame_id += 1
             img_h, img_w = frame.shape[:2]
+
+            # Black-frame detection: a stuck or all-black source produces
+            # near-zero variance frames. Warn once per low-var stretch (not
+            # per frame) so the log doesn't drown in repeats.
+            try:
+                frame_variance = float(frame.var())
+            except Exception:  # pragma: no cover — defensive against odd dtypes
+                frame_variance = float("nan")
+            if frame_variance == frame_variance and frame_variance < _BLACK_FRAME_VAR_THRESHOLD:
+                consecutive_black_frames += 1
+                if (
+                    consecutive_black_frames >= _BLACK_FRAME_WARN_AFTER
+                    and not black_frame_warn_emitted
+                ):
+                    print(
+                        f"vision: {source.src_label} produced "
+                        f"{consecutive_black_frames} consecutive low-variance frames "
+                        f"(var<{_BLACK_FRAME_VAR_THRESHOLD}); camera may be stuck or covered",
+                        file=sys.stderr,
+                    )
+                    black_frame_warn_emitted = True
+            else:
+                consecutive_black_frames = 0
+                black_frame_warn_emitted = False
             if detect_pipeline is not None:
                 tracker_result = detect_pipeline.process_frame(frame=frame, frame_id=frame_id)
             elif pattern_generator is not None:
