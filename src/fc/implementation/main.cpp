@@ -215,11 +215,20 @@ int main() {
              fc::cmd::seq_advances(*last_cmd_seq, static_cast<std::int32_t>(cmd.seq)))) {
             last_cmd_seq = static_cast<std::int32_t>(cmd.seq);
 
-            fc::ControlMode desired_mode = fc::ControlMode::LandSafely;
+            // Unknown desired_mode (schema-version skew, backend bug, fuzzed
+            // input) does NOT trigger LandSafely. The previous behaviour was
+            // to stomp into LandSafely on every parse blip, which under a
+            // sustained malformed-CMD stream would oscillate the drone.
+            // Keep the current mode and log the rejection — the operator
+            // sees it via TEL `control_mode` not changing + log volume,
+            // which is a more specific failure mode than "drone lands".
+            fc::ControlMode desired_mode;
             if (to_control_mode(cmd.desired_mode, desired_mode)) {
                 flight_controller.setControlMode(desired_mode);
             } else {
-                flight_controller.setControlMode(fc::ControlMode::LandSafely);
+                std::cerr << "[FC] CMD seq=" << cmd.seq
+                          << " has unknown desired_mode=" << cmd.desired_mode
+                          << "; keeping current control mode\n";
             }
 
             if (cmd.has_arm) {
