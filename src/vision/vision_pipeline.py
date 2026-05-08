@@ -45,6 +45,18 @@ class VisionPipelineConfig:
     # box drift (the detector is noisy too) but flips on a real identity
     # swap or large position jump.
     tracker_reinit_iou: float = 0.5
+    # Confidence decay applied to the published TRACKING confidence on every
+    # tracker-only frame (no detection arrived). Multiplicative: each
+    # tracker-only frame multiplies the current conf by this factor. A
+    # detection frame resets conf to the detection's own confidence. Default
+    # 0.95 means after ~14 tracker-only frames a detection conf=1.0
+    # decays to ~0.5; after ~50 frames to ~0.08 (clamped at the floor).
+    tracker_only_conf_decay: float = 0.95
+    # Lower bound for the decayed confidence so a long tracker-only stretch
+    # doesn't underrun past zero. UI consumers compare against this floor
+    # to decide how to render "tracker prediction stale". Configurable via
+    # the env var VISION_TRACKER_ONLY_CONF_FLOOR (read in main.py).
+    tracker_only_conf_floor: float = 0.3
 
     def __post_init__(self) -> None:
         if self.detect_hold_n < 0:
@@ -61,6 +73,10 @@ class VisionPipelineConfig:
             raise ValueError("target_detected_grace_frames must be >= 0")
         if not (0.0 <= self.tracker_reinit_iou <= 1.0):
             raise ValueError("tracker_reinit_iou must be in [0, 1]")
+        if not (0.0 < self.tracker_only_conf_decay <= 1.0):
+            raise ValueError("tracker_only_conf_decay must be in (0, 1]")
+        if not (0.0 <= self.tracker_only_conf_floor <= 1.0):
+            raise ValueError("tracker_only_conf_floor must be in [0, 1]")
 
 
 class VisionPipeline:
@@ -87,6 +103,10 @@ class VisionPipeline:
         # is True). Used for the IoU sanity check that gates re-init when a
         # detection arrives while tracking — see _update_tracking.
         self._last_tracker_bbox: PixelBBox | None = None
+        # Most recent published TRACKING confidence — seeded from a detection
+        # frame, then multiplicatively decayed on tracker-only frames toward
+        # the configured floor. Reset to 0.0 on transition out of TRACKING.
+        self._last_tracking_conf: float = 0.0
         # Counter for consecutive missed-detection frames in TARGET_DETECTED.
         # Reset on (a) entry to TARGET_DETECTED from another state and
         # (b) any successful detection while in TARGET_DETECTED. Compared
@@ -107,6 +127,7 @@ class VisionPipeline:
         self._last_detection_frame = None
         self._tracker_active = False
         self._last_tracker_bbox = None
+        self._last_tracking_conf = 0.0
         self._target_detected_miss_streak = 0
         self.tracker.reset()
 
@@ -179,7 +200,13 @@ class VisionPipeline:
             self._state = VisState.TRACKING
             self._search_counter = 0
             self._tracker_active = bool(self.tracker.initialize(frame=frame, bbox=current.bbox))
-            return _tracking_result(bbox=current.bbox, img_w=img_w, img_h=img_h)
+            # Seed the tracking confidence from the detection that just got
+            # us here. Subsequent tracker-only frames will decay this value;
+            # the next detection will re-seed it.
+            self._last_tracking_conf = float(current.confidence)
+            return _tracking_result(
+                bbox=current.bbox, img_w=img_w, img_h=img_h, conf=self._last_tracking_conf
+            )
 
         return _zero_result(VisState.TARGET_DETECTED)
 
@@ -222,16 +249,34 @@ class VisionPipeline:
                     self.tracker.initialize(frame=frame, bbox=detected.bbox)
                 )
                 self._last_tracker_bbox = detected.bbox if self._tracker_active else None
-            return _tracking_result(bbox=detected.bbox, img_w=img_w, img_h=img_h)
+            # Detection frame: re-seed the published confidence from the
+            # detector's own confidence (audit A9). The previous behaviour
+            # was hardcoded conf=1.0 regardless of detector output, which
+            # masked uncertain detections from the UI sparkline.
+            self._last_tracking_conf = float(detected.confidence)
+            return _tracking_result(
+                bbox=detected.bbox, img_w=img_w, img_h=img_h, conf=self._last_tracking_conf
+            )
 
         if tracker_success and tracker_bbox is not None:
-            return _tracking_result(bbox=tracker_bbox, img_w=img_w, img_h=img_h)
+            # Tracker-only frame: decay the cached conf toward the floor.
+            # The decay rate (0.95/frame default) means a high-conf detection
+            # remains "trustworthy" for ~14 tracker-only frames before
+            # dropping below 0.5 — long enough to ride out a typical
+            # detector miss-streak, short enough that a long tracker-only
+            # stretch surfaces in the UI as "stale".
+            decayed = self._last_tracking_conf * self.config.tracker_only_conf_decay
+            self._last_tracking_conf = max(decayed, self.config.tracker_only_conf_floor)
+            return _tracking_result(
+                bbox=tracker_bbox, img_w=img_w, img_h=img_h, conf=self._last_tracking_conf
+            )
 
         self._state = VisState.SEARCHING
         self._search_counter = 0
         self._detected_hold_counter = 0
         self._detected_box = None
         self._last_tracker_bbox = None
+        self._last_tracking_conf = 0.0
         self.tracker.reset()
         self._tracker_active = False
         return _zero_result(VisState.SEARCHING)
@@ -261,6 +306,7 @@ class VisionPipeline:
         self.tracker.reset()
         self._tracker_active = False
         self._last_tracker_bbox = None
+        self._last_tracking_conf = 0.0
 
     def _should_detect(self, frame_id: int) -> bool:
         return ((max(1, frame_id) - 1) % self.config.detect_every_n) == 0
@@ -297,7 +343,7 @@ class VisionPipeline:
         return None
 
 
-def _tracking_result(bbox: PixelBBox, img_w: int, img_h: int) -> TrackerResult:
+def _tracking_result(bbox: PixelBBox, img_w: int, img_h: int, conf: float = 1.0) -> TrackerResult:
     normalized_bbox = normalize_bbox_xywh(
         x=bbox.x,
         y=bbox.y,
@@ -309,7 +355,7 @@ def _tracking_result(bbox: PixelBBox, img_w: int, img_h: int) -> TrackerResult:
     return TrackerResult(
         state=VisState.TRACKING,
         bbox=normalized_bbox,
-        conf=1.0,
+        conf=conf,
         track_id=1,
     )
 

@@ -310,6 +310,13 @@ def run_loop(
             infer_size=config.infer_size,
         )
         tracker_impl = tracker or OpenCvTracker(config.tracker)
+        # Tracker-only confidence decay knobs are env-driven so operators can
+        # tune them without a code change. Defaults match VisionPipelineConfig
+        # (0.95 decay rate, 0.3 floor) — well-tested values from the audit
+        # rationale; override only if a deployment shows the UI sparkline
+        # behaving wrong at the edges.
+        decay_rate = float(os.environ.get("VISION_TRACKER_ONLY_CONF_DECAY", "0.95"))
+        decay_floor = float(os.environ.get("VISION_TRACKER_ONLY_CONF_FLOOR", "0.3"))
         detect_pipeline = VisionPipeline(
             detector=detector_impl,
             tracker=tracker_impl,
@@ -319,6 +326,8 @@ def run_loop(
                 detect_every_n=config.detect_every_n,
                 desired_cx=config.desired_cx,
                 desired_cy=config.desired_cy,
+                tracker_only_conf_decay=decay_rate,
+                tracker_only_conf_floor=decay_floor,
             ),
         )
 

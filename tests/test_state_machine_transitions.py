@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import numpy as np
+import pytest
 
 from src.vision.types import Detection, PixelBBox, VisState
 from src.vision.vision_pipeline import VisionPipeline, VisionPipelineConfig
@@ -313,6 +314,107 @@ def test_tracking_reinits_on_low_iou_detection() -> None:
     # init_calls == 2: entry into TRACKING (frame 2) plus the IoU-failed
     # detection at frame 4 forced a re-init.
     assert tracker.init_calls == 2
+
+
+def test_tracking_publishes_real_detector_confidence() -> None:
+    """Audit A9: TRACKING-state confidence used to be hard-coded 1.0
+    regardless of detector confidence. Now it's the detector's own
+    confidence on detection frames."""
+    detector = _SequenceDetector(
+        by_frame=(
+            (_det(100.0, 100.0, 80.0, 80.0, conf=0.6),),  # frame 1: TARGET_DETECTED
+            (_det(100.0, 100.0, 80.0, 80.0, conf=0.8),),  # frame 2: TRACKING (init)
+        )
+    )
+    tracker = _CountingTracker()
+    pipeline = VisionPipeline(
+        detector=detector,
+        tracker=tracker,
+        config=VisionPipelineConfig(detect_hold_n=1, search_n=2, detect_every_n=1),
+    )
+
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    pipeline.process_frame(frame=frame, frame_id=1)
+    result_2 = pipeline.process_frame(frame=frame, frame_id=2)
+
+    # Detection at frame 2 had conf=0.8 — must surface in the published result.
+    assert result_2.state == VisState.TRACKING
+    assert result_2.conf == 0.8
+
+
+def test_tracker_only_frames_decay_confidence_toward_floor() -> None:
+    """Audit A9: tracker-only frames (no detection) multiply the published
+    confidence by a decay factor each frame, bounded below by the configured
+    floor. Detection frames re-seed it."""
+    detector = _SequenceDetector(
+        by_frame=(
+            (_det(100.0, 100.0, 80.0, 80.0, conf=0.9),),  # frame 1: TARGET_DETECTED
+            (_det(100.0, 100.0, 80.0, 80.0, conf=0.9),),  # frame 2: TRACKING (init), conf=0.9
+            (),  # frame 3: tracker-only => conf decays
+            (),  # frame 4: tracker-only => conf decays again
+            (),  # frame 5: tracker-only => conf decays again
+        )
+    )
+    # Tracker stays locked on a stable bbox so we exercise tracker-only frames.
+    tracker = _CountingTracker(update_result=(True, PixelBBox(x=99.0, y=99.0, w=80.0, h=80.0)))
+    pipeline = VisionPipeline(
+        detector=detector,
+        tracker=tracker,
+        config=VisionPipelineConfig(
+            detect_hold_n=1,
+            search_n=10,  # avoid SEARCHING fall-through during the test window
+            detect_every_n=1,
+            tracker_only_conf_decay=0.5,
+            tracker_only_conf_floor=0.1,
+        ),
+    )
+
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    pipeline.process_frame(frame=frame, frame_id=1)
+    pipeline.process_frame(frame=frame, frame_id=2)  # TRACKING entry, conf=0.9
+    r3 = pipeline.process_frame(frame=frame, frame_id=3)
+    r4 = pipeline.process_frame(frame=frame, frame_id=4)
+    r5 = pipeline.process_frame(frame=frame, frame_id=5)
+
+    # 0.9 * 0.5 = 0.45, then 0.225, then 0.1125 -> floor would clamp at 0.1.
+    assert r3.conf == 0.45
+    assert r4.conf == 0.225
+    # 0.225 * 0.5 = 0.1125 — above floor 0.1, so no clamp yet.
+    assert r5.conf == pytest.approx(0.1125)
+
+
+def test_tracker_only_confidence_clamps_at_floor() -> None:
+    """A long tracker-only stretch must never publish a confidence below the
+    configured floor — the floor IS the contract for "stale tracker output"
+    in the UI."""
+    detector = _SequenceDetector(
+        by_frame=(
+            (_det(100.0, 100.0, 80.0, 80.0, conf=0.5),),
+            (_det(100.0, 100.0, 80.0, 80.0, conf=0.5),),
+        )
+        + tuple([()] * 50)  # 50 tracker-only frames
+    )
+    tracker = _CountingTracker(update_result=(True, PixelBBox(x=99.0, y=99.0, w=80.0, h=80.0)))
+    pipeline = VisionPipeline(
+        detector=detector,
+        tracker=tracker,
+        config=VisionPipelineConfig(
+            detect_hold_n=1,
+            search_n=100,
+            detect_every_n=1,
+            tracker_only_conf_decay=0.5,  # aggressive decay
+            tracker_only_conf_floor=0.3,
+        ),
+    )
+
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    last_conf = 1.0
+    for i in range(1, 53):
+        result = pipeline.process_frame(frame=frame, frame_id=i)
+        last_conf = result.conf
+
+    # After many decays, conf must rest at the floor exactly — never below.
+    assert last_conf == 0.3
 
 
 def test_tracking_prefers_detector_when_tracker_fails_same_frame() -> None:
