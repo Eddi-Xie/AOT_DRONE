@@ -421,7 +421,8 @@ def run_loop(
                     print(
                         f"vision: {source.src_label} produced "
                         f"{consecutive_black_frames} consecutive low-variance frames "
-                        f"(var<{_BLACK_FRAME_VAR_THRESHOLD}); camera may be stuck or covered",
+                        f"(var<{_BLACK_FRAME_VAR_THRESHOLD}, frame_id={frame_id}); "
+                        f"camera may be stuck or covered",
                         file=sys.stderr,
                     )
                     black_frame_warn_emitted = True

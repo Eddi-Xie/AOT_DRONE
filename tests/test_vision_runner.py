@@ -90,10 +90,12 @@ def test_black_frame_warning_after_30_consecutive_low_var_frames(
         clock=_StepClock(start_s=0.0, step_s=0.04),
     )
     captured = capsys.readouterr()
-    # Warning message references the threshold + source label and fires
-    # exactly once across the 35-frame run (warn_emitted flag prevents repeats).
+    # Warning message references the threshold + source label + frame_id
+    # (for log correlation) and fires exactly once across the 35-frame run
+    # (warn_emitted flag prevents repeats).
     assert "consecutive low-variance frames" in captured.err
     assert "file:fake.mp4" in captured.err
+    assert "frame_id=" in captured.err
     assert captured.err.count("consecutive low-variance frames") == 1
 
 
