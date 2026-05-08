@@ -26,12 +26,18 @@ class CommandServer {
     bool latest_command(CommandFrame& out_cmd) const;
 
     // Latest parsed command + the monotonic timestamp at which it landed,
-    // returned together under a single mutex acquisition. Use this when both
-    // values must be a consistent snapshot — e.g. when the main loop runs the
-    // seq filter against `out_cmd.seq` and the stale-CMD comparison against
-    // `out_time_s` in the same tick. Calling latest_command() and
+    // returned together under a single mutex acquisition. Use this when a
+    // caller needs a coherent snapshot of both values in the same decision
+    // (for example, a metrics/log builder that pairs cmd.seq with the
+    // recv-time on the same line). Calling latest_command() and
     // seconds_since_last_cmd() separately races against the writer and can
-    // observe a stale (cmd, time) pair.
+    // observe a mismatched (cmd, time) pair.
+    //
+    // main.cpp deliberately uses the separate-call pattern: a writer commit
+    // between the two reads strictly improves staleness accuracy (cmd_age
+    // reflects the freshest network frame, even if a newer CMD raced in
+    // after the seq read), and main.cpp doesn't make a single decision that
+    // depends on both values being from the same snapshot.
     bool latest_command_with_time(CommandFrame& out_cmd, double& out_time_s) const;
 
     // Seconds since last valid command frame (monotonic time in seconds).

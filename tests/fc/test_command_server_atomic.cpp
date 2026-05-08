@@ -29,21 +29,22 @@
 
 namespace {
 
-// Friend-style harness: we can't reach CommandServer's private members from
-// here, so we exercise the contract via the public surface. The shape of
-// the test below relies on CommandServer's main loop being the writer; in a
-// pure-unit environment we'd need a friend hook. For now this test runs
-// CommandServer's natural lifecycle and asserts the getter never observes
-// `(has_cmd_=true, last_cmd_time_s_=0)` — the most obvious torn-read
-// signature.
+// What this file actually exercises (kept in sync with the file-level
+// docstring above):
 //
-// Strategy: start CommandServer; pretend no client; call
-// `latest_command_with_time` repeatedly. Without a CMD published, the
-// getter must return false and never write a stale time into out_time_s.
-// We assert the negative-case contract; the positive-case contract (lock-
-// coherent (cmd, time) pair) is exercised whenever any test that drives a
-// real CMD through the TCP listener observes consistent values, which the
-// e2e suite already does.
+//  - Construct a CommandServer but DO NOT call start(). No TCP listener is
+//    opened; no writer thread is spawned; no CMDs are ever published.
+//  - Call latest_command_with_time() repeatedly. Because nothing has been
+//    published, the getter MUST return false and MUST NOT write a stale
+//    timestamp into out_time_s.
+//  - In the concurrent test below, hammer the getter from a reader thread
+//    while the main thread sleeps briefly — this pins that the getter
+//    locking is safe under contention even when there's no writer at all.
+//
+// We can't drive the genuine torn-read scenario from a unit test because
+// CommandServer's writer is on the private TCP-accept path. A real
+// torn-read test needs either a friend hook or a TCP harness; both are
+// deferred to S0.6.
 
 void test_getter_returns_false_before_any_cmd() {
     fc::CommandServer server(0, "127.0.0.1"); // ephemeral port; never started

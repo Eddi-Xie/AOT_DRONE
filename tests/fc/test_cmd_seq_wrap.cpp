@@ -58,9 +58,9 @@ void test_wrap_forward_accepts() {
 void test_wrap_backward_rejects() {
     using fc::cmd::seq_advances;
     // The backward wrap: prev=0, candidate=CMD_SEQ_MAX would mean a forward
-    // jump of 2^31 - 1 (≈ half-space minus 1) but the comparator must
-    // resolve large jumps as "behind", protecting against a stale frame from
-    // before a backend reseed.
+    // jump of 2^31 - 1, which is well beyond the 2^30 half-space threshold.
+    // The comparator must resolve large jumps as "behind", protecting
+    // against a stale frame from before a backend reseed.
     TEST_ASSERT(!seq_advances(0, kCmdSeqMax));
     TEST_ASSERT(!seq_advances(1, kCmdSeqMax));
     TEST_ASSERT(!seq_advances(0, kCmdSeqMax - 1));
