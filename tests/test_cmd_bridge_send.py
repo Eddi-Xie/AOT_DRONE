@@ -1,6 +1,7 @@
 from src.backend.cmd_bridge import CmdBridge
 from src.backend.state import SharedState
 from tests.cmd_test_utils import FramedCmdCaptureServer, require_tcp_bind_or_skip, wait_until
+from tests.seq_test_utils import assert_seqs_strictly_advance
 
 
 def test_cmd_bridge_sends_incrementing_cmd_messages() -> None:
@@ -33,8 +34,9 @@ def test_cmd_bridge_sends_incrementing_cmd_messages() -> None:
         assert msg["type"] == "CMD"
 
     seqs = [int(msg["seq"]) for msg in messages]
-    for idx in range(1, len(seqs)):
-        assert seqs[idx] > seqs[idx - 1]
+    # Wrap-aware monotonicity check: strict `>` would falsely fail at the
+    # CMD_SEQ_MAX -> 0 boundary even though that's a valid forward step.
+    assert_seqs_strictly_advance(seqs)
 
     cmd_status = state.get_cmd_bridge_status()
     assert cmd_status["cmd_tx_ok"] >= 3

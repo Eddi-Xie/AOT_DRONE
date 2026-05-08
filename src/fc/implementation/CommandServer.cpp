@@ -173,13 +173,19 @@ void CommandServer::run_loop() {
                 continue;
             }
 
+            // Publish the (cmd, time) pair atomically under the same mutex.
+            // The previous code stored `last_cmd_time_s_` as a separate
+            // std::atomic<double> outside the lock, so a reader running
+            // between the unlock and the atomic store could see the new
+            // last_cmd_ paired with the *previous* timestamp.
+            const double recv_time_s = now_s();
             {
                 std::lock_guard<std::mutex> lock(cmd_mutex_);
                 has_cmd_ = true;
                 last_json_ = json;
                 last_cmd_ = parsed;
+                last_cmd_time_s_ = recv_time_s;
             }
-            last_cmd_time_s_.store(now_s());
 
             std::cout << "[FC] CMD seq=" << parsed.seq << " desired_mode=" << parsed.desired_mode
                       << "\n";
@@ -205,8 +211,22 @@ bool CommandServer::latest_command(CommandFrame& out_cmd) const {
     return true;
 }
 
+bool CommandServer::latest_command_with_time(CommandFrame& out_cmd, double& out_time_s) const {
+    std::lock_guard<std::mutex> lock(cmd_mutex_);
+    if (!has_cmd_) {
+        return false;
+    }
+    out_cmd = last_cmd_;
+    out_time_s = last_cmd_time_s_;
+    return true;
+}
+
 double CommandServer::seconds_since_last_cmd() const {
-    const double t = last_cmd_time_s_.load();
+    double t;
+    {
+        std::lock_guard<std::mutex> lock(cmd_mutex_);
+        t = last_cmd_time_s_;
+    }
     if (t <= 0.0) {
         return 1e9;
     }

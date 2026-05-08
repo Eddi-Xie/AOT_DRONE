@@ -1,21 +1,30 @@
 #include "Clamp.h"
+#include "CmdSeq.h"
 #include "CommandServer.h"
 #include "FlightController.h"
 #include "ProtocolConstants.h"
 #include "RcMath.h"
 #include "TelemetryPublisher.h"
 
+#include <arpa/inet.h>
+
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <chrono>
+#include <clocale>
 #include <cmath>
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <locale>
+#include <optional>
 #include <sstream>
 #include <string>
+#include <system_error>
 #include <thread>
 
 namespace {
@@ -134,6 +143,10 @@ std::string build_tel_json(uint64_t seq, const fc::TelemetryData& telemetry,
     }
 
     std::ostringstream oss;
+    // Pin the C locale on this stream so float formatting always uses '.' as
+    // the decimal separator regardless of the process locale (e.g.
+    // de_DE.UTF-8 would otherwise produce "1,234567" — invalid JSON).
+    oss.imbue(std::locale::classic());
     oss << std::fixed << std::setprecision(6);
     oss << "{"
         << "\"type\":\"TEL\","
@@ -156,6 +169,13 @@ std::string build_tel_json(uint64_t seq, const fc::TelemetryData& telemetry,
 } // namespace
 
 int main() {
+    // Pin LC_NUMERIC=C process-wide so any future float formatter (sprintf,
+    // strtod, etc.) is locale-safe by default. The TEL JSON ostringstream
+    // additionally imbues std::locale::classic() in build_tel_json — defence
+    // in depth against a third-party library that flips the locale at
+    // runtime.
+    std::setlocale(LC_NUMERIC, "C");
+
     std::signal(SIGINT, handle_signal);
     std::signal(SIGTERM, handle_signal);
 
@@ -175,10 +195,55 @@ int main() {
     std::cout << "[FC] CommandServer listening on " << fc_bind_host << ":" << proto::TCP_CMD_PORT
               << "\n";
 
-    fc::TelemetryPublisher telemetry_publisher("127.0.0.1", proto::UDP_TEL_PORT);
+    // TEL UDP destination is configurable so a multi-machine deployment
+    // (backend on a separate host) doesn't require a recompile. Defaults
+    // match the existing single-host setup. Mirrors FC_BIND_HOST shape from
+    // chore/sprint0-network.
+    const char* fc_tel_host_env = std::getenv("FC_TEL_HOST");
+    const std::string fc_tel_host =
+        (fc_tel_host_env && *fc_tel_host_env) ? std::string(fc_tel_host_env) : "127.0.0.1";
+    {
+        // TelemetryPublisher's UDP send path uses inet_pton internally and
+        // will silently fail on a hostname like "localhost". Validate up-
+        // front with the same rule so the error message points at the
+        // operator-facing config knob instead of "Failed to init UDP
+        // telemetry publisher" with no further explanation.
+        sockaddr_in probe{};
+        if (inet_pton(AF_INET, fc_tel_host.c_str(), &probe.sin_addr) != 1) {
+            std::cerr << "[FC] Invalid FC_TEL_HOST='" << fc_tel_host
+                      << "', refusing to start (use a dotted-quad IPv4 literal "
+                         "such as 127.0.0.1, or 0.0.0.0; hostnames are not resolved)\n";
+            command_server.stop();
+            return 1;
+        }
+    }
+
+    const char* fc_tel_port_env = std::getenv("FC_TEL_PORT");
+    int fc_tel_port = static_cast<int>(proto::UDP_TEL_PORT);
+    if (fc_tel_port_env && *fc_tel_port_env) {
+        // Strict parse: from_chars rejects trailing junk (e.g. "9001abc"),
+        // unlike std::stoi which silently accepts the leading digits.
+        const char* const begin = fc_tel_port_env;
+        const char* const end = begin + std::strlen(begin);
+        auto [ptr, ec] = std::from_chars(begin, end, fc_tel_port);
+        if (ec != std::errc{} || ptr != end) {
+            std::cerr << "[FC] Invalid FC_TEL_PORT='" << fc_tel_port_env
+                      << "', refusing to start (must be a base-10 integer with no trailing junk)\n";
+            command_server.stop();
+            return 1;
+        }
+        if (fc_tel_port <= 0 || fc_tel_port > 65535) {
+            std::cerr << "[FC] FC_TEL_PORT=" << fc_tel_port
+                      << " out of range [1, 65535], refusing to start\n";
+            command_server.stop();
+            return 1;
+        }
+    }
+
+    fc::TelemetryPublisher telemetry_publisher(fc_tel_host, fc_tel_port);
     if (!telemetry_publisher.ok()) {
-        std::cerr << "[FC] Failed to init UDP telemetry publisher for 127.0.0.1:"
-                  << proto::UDP_TEL_PORT << "\n";
+        std::cerr << "[FC] Failed to init UDP telemetry publisher for " << fc_tel_host << ":"
+                  << fc_tel_port << "\n";
         command_server.stop();
         return 1;
     }
@@ -187,10 +252,26 @@ int main() {
     flight_controller.setControlMode(fc::ControlMode::LandSafely);
 
     std::cout << "[FC] fc_app running. CMD TCP:" << proto::TCP_CMD_PORT
-              << " TEL UDP:127.0.0.1:" << proto::UDP_TEL_PORT << "\n";
+              << " TEL UDP:" << fc_tel_host << ":" << fc_tel_port << "\n";
 
-    int last_cmd_seq = -1;
+    // Signed-modular int32 comparator on cmd.seq handles wrap correctly:
+    // a fresh seq of 0 after CMD_SEQ_MAX is treated as "ahead by 1", not
+    // "behind by 2^31 - 1". `std::nullopt` => no CMD seen yet, so the first
+    // valid frame is always accepted regardless of its seq value (closes
+    // the `last_cmd_seq = -1` sentinel hole that collided with seq=0 after
+    // backend reseed).
+    std::optional<std::int32_t> last_cmd_seq;
     uint64_t tel_seq = 0;
+
+    // Stale-CMD failsafe: enter LandSafely on the fresh -> stale transition
+    // only, not on every tick. The previous code re-stomped setControlMode
+    // every iteration (50 Hz), which spammed log output and prevented any
+    // observability into "did we just enter failsafe vs have we been here
+    // for a while". The end state is identical to today's (LandSafely while
+    // stale), but the entry is now an event, not a per-tick stomp. The
+    // two-stage Healthy/StaleSoft/StaleHard state machine + auto-resume is
+    // an in-flight-behaviour change deferred to S0.7 (HIL bench gate).
+    bool failsafe_engaged = false;
 
     const auto period = std::chrono::milliseconds(1000 / kTelHz);
     auto next_tick = std::chrono::steady_clock::now();
@@ -202,14 +283,44 @@ int main() {
         last_tick = now;
 
         fc::CommandFrame cmd;
-        if (command_server.latest_command(cmd) && cmd.seq != last_cmd_seq) {
-            last_cmd_seq = cmd.seq;
+        // latest_command and seconds_since_last_cmd are read separately, not
+        // from a single coherent snapshot. That's intentional: a writer commit
+        // between the two reads strictly improves staleness accuracy (cmd_age
+        // below reflects the freshest network frame, even if a newer CMD
+        // raced in after this seq read). The atomic-publish fix in
+        // CommandServer just guarantees each call returns a self-consistent
+        // value; main.cpp doesn't need cross-call atomicity here.
+        constexpr std::int32_t kCmdSeqMaxFc = 0x7FFFFFFF; // mirrors backend CMD_SEQ_MAX
+        const bool have_cmd = command_server.latest_command(cmd);
+        const bool seq_in_range = have_cmd && cmd.seq >= 0 && cmd.seq <= kCmdSeqMaxFc;
+        if (have_cmd && !seq_in_range) {
+            // Out-of-range seqs (negative or > CMD_SEQ_MAX) violate the wire
+            // contract. seq_advances would still produce a deterministic
+            // boolean, but the modular comparison is undefined outside
+            // [0, CMD_SEQ_MAX] — drop with a log instead of letting a
+            // malformed CMD poison last_cmd_seq.
+            std::cerr << "[FC] Dropped CMD with out-of-range seq=" << cmd.seq << " (must be in [0, "
+                      << kCmdSeqMaxFc << "])\n";
+        }
+        if (seq_in_range &&
+            (!last_cmd_seq.has_value() ||
+             fc::cmd::seq_advances(*last_cmd_seq, static_cast<std::int32_t>(cmd.seq)))) {
+            last_cmd_seq = static_cast<std::int32_t>(cmd.seq);
 
-            fc::ControlMode desired_mode = fc::ControlMode::LandSafely;
+            // Unknown desired_mode (schema-version skew, backend bug, fuzzed
+            // input) does NOT trigger LandSafely. The previous behaviour was
+            // to stomp into LandSafely on every parse blip, which under a
+            // sustained malformed-CMD stream would oscillate the drone.
+            // Keep the current mode and log the rejection — the operator
+            // sees it via TEL `control_mode` not changing + log volume,
+            // which is a more specific failure mode than "drone lands".
+            fc::ControlMode desired_mode;
             if (to_control_mode(cmd.desired_mode, desired_mode)) {
                 flight_controller.setControlMode(desired_mode);
             } else {
-                flight_controller.setControlMode(fc::ControlMode::LandSafely);
+                std::cerr << "[FC] CMD seq=" << cmd.seq
+                          << " has unknown desired_mode=" << cmd.desired_mode
+                          << "; keeping current control mode\n";
             }
 
             if (cmd.has_arm) {
@@ -223,8 +334,24 @@ int main() {
         }
 
         const double cmd_age_s = command_server.seconds_since_last_cmd();
-        if (cmd_age_s > proto::CMD_TIMEOUT_S) {
+        const bool stale_now = cmd_age_s > proto::CMD_TIMEOUT_S;
+        if (stale_now && !failsafe_engaged) {
+            failsafe_engaged = true;
             flight_controller.setControlMode(fc::ControlMode::LandSafely);
+            std::cerr << "[FC] CMD link stale (age=" << cmd_age_s << "s > " << proto::CMD_TIMEOUT_S
+                      << "s); entering LandSafely failsafe\n";
+        } else if (!stale_now && failsafe_engaged) {
+            failsafe_engaged = false;
+            // Clear the latch only — don't auto-resume any prior mode. A
+            // fresh CMD earlier in this same tick may have already updated
+            // the control mode (the CMD-application block above runs
+            // before this stale check); otherwise the controller stays in
+            // whatever mode it's currently in (typically LandSafely from
+            // the entry-side branch). Auto-resume of a saved pre-failsafe
+            // mode is the deferred two-stage state machine in S0.7.
+            std::cerr << "[FC] CMD link recovered (age=" << cmd_age_s
+                      << "s); cleared failsafe latch; mode unchanged unless a CMD already applied "
+                         "this tick\n";
         }
 
         (void)flight_controller.updateTimeStep(dt);

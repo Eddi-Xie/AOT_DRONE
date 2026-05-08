@@ -78,6 +78,36 @@ def test_reserve_cmd_seq_wraps_after_int32_maximum() -> None:
     assert state.reserve_cmd_seq() == 0
 
 
+def test_ensure_cmd_seq_minimum_handles_post_wrap_state() -> None:
+    """After cmd_next_seq has wrapped to a low value, a stale-high `minimum`
+    from a CmdBridge restart (e.g. seq_start = CMD_SEQ_MAX - 10) MUST NOT
+    silently leave cmd_next_seq pointed at the post-wrap range, because that
+    would re-issue old sequence numbers the FC has already seen.
+
+    Pre-fix behaviour (linear `<`): `cmd_next_seq=5 < clamped_minimum=high`
+    is True, so cmd_next_seq jumps backward to the high value — but that
+    high value is *behind* the FC's last-seen-seq in wrap-space, so the FC
+    rejects the next 2^31 - 10 frames silently.
+
+    Post-fix behaviour (signed-modular): `_seq_advances(5, high)` returns
+    False because `high` is "behind" the post-wrap `5` in the half-space
+    sense, so cmd_next_seq stays at 5 and continues from there. Operator
+    intervention (e.g. an explicit reseed) is required to escape, which is
+    the correct posture — we don't silently re-issue.
+    """
+    state = SharedState()
+    # Simulate a state that has just wrapped past CMD_SEQ_MAX.
+    state.cmd_next_seq = 5
+
+    # A bridge restart asks for a minimum that's "behind" in wrap-space.
+    state.ensure_cmd_seq_minimum(CMD_SEQ_MAX - 10)
+    assert state.cmd_next_seq == 5  # unchanged: ahead in wrap-space wins
+
+    # By contrast, a minimum that's genuinely "ahead" in wrap-space is honoured.
+    state.ensure_cmd_seq_minimum(50)
+    assert state.cmd_next_seq == 50
+
+
 def test_reserve_cmd_seq_clamps_negative_minimum_to_zero() -> None:
     """Negative minimum must not pull the sequence backwards or raise."""
     state = SharedState()
@@ -94,30 +124,53 @@ def test_reserve_cmd_seq_clamps_negative_minimum_to_zero() -> None:
     assert state.cmd_next_seq == 6
 
 
-def test_reserve_cmd_seq_clamps_over_max_minimum_to_max() -> None:
-    """Minimum above CMD_SEQ_MAX must clamp to CMD_SEQ_MAX, then wrap."""
+def test_reserve_cmd_seq_clamps_over_max_minimum_does_not_jump_backward() -> None:
+    """Over-max minimum must clamp to CMD_SEQ_MAX, but cmd_next_seq must NOT
+    jump to it from a low post-wrap state.
+
+    Pre-S0.4 behaviour (linear `<`) jumped cmd_next_seq from 0 to CMD_SEQ_MAX,
+    which against a wrap-aware FC would re-issue sequences the FC has already
+    seen as "behind" and dropped. Post-S0.4 the comparison is signed-modular:
+    CMD_SEQ_MAX is "behind" 0 in the wrap space (forward distance == 2^31 - 1
+    > half-space), so the bump is rejected and cmd_next_seq advances normally
+    from its current value.
+
+    The legitimate use case (a bridge restart with `seq_start=high` after a
+    fresh process start) is a residual: if the operator needs to force a
+    high resume seq, they assign `state.cmd_next_seq` directly. No silent
+    foot-gun via the public API.
+    """
     state = SharedState()
     state.cmd_next_seq = 0
 
     seq = state.reserve_cmd_seq(minimum=CMD_SEQ_MAX + 1000)
-    assert seq == CMD_SEQ_MAX
-    # The very next reserve wraps to 0.
-    assert state.reserve_cmd_seq() == 0
+    # No jump — clamping happens, but the modular comparator says "behind".
+    assert seq == 0
+    # Subsequent reserves continue from 1 onward, unchanged by the rejected bump.
+    assert state.reserve_cmd_seq() == 1
 
 
 def test_ensure_cmd_seq_minimum_clamps_out_of_range_inputs() -> None:
-    """Out-of-range minimums must not crash or move cmd_next_seq backwards."""
+    """Out-of-range minimums must not crash or move cmd_next_seq backwards.
+
+    The over-max case under signed-modular semantics is "behind" any low
+    cmd_next_seq, so it is rejected (mirrors the rationale in
+    test_ensure_cmd_seq_minimum_handles_post_wrap_state above). Negative
+    minimum still clamps to 0 and is then trivially "behind" any positive
+    cmd_next_seq, so no bump.
+    """
     state = SharedState()
     state.cmd_next_seq = 50
 
-    # Negative minimum clamps to 0; cmd_next_seq stays at 50 (> 0).
+    # Negative minimum clamps to 0; cmd_next_seq stays at 50 (>0, ahead in mod-space).
     state.ensure_cmd_seq_minimum(-100)
     assert state.cmd_next_seq == 50
 
-    # Over-max minimum clamps to CMD_SEQ_MAX and bumps cmd_next_seq up.
+    # Over-max minimum clamps to CMD_SEQ_MAX, but signed-modular says "behind"
+    # (forward distance is 2^31 - 51 > half-space). Reject the bump.
     state.ensure_cmd_seq_minimum(CMD_SEQ_MAX + 1000)
-    assert state.cmd_next_seq == CMD_SEQ_MAX
+    assert state.cmd_next_seq == 50
 
-    # Subsequent reserve returns CMD_SEQ_MAX, then wraps.
-    assert state.reserve_cmd_seq() == CMD_SEQ_MAX
-    assert state.reserve_cmd_seq() == 0
+    # Reserve continues from 50 onward.
+    assert state.reserve_cmd_seq() == 50
+    assert state.reserve_cmd_seq() == 51
