@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { getBackendConfig, postIntent } from "./api";
 import ControlPanel from "./components/ControlPanel";
+import ErrorBoundary from "./components/ErrorBoundary";
 import StatusBadge, { BadgeSeverity } from "./components/StatusBadge";
 import TelemetryPanel from "./components/TelemetryPanel";
 import TrackingSummary from "./components/TrackingSummary";
@@ -701,11 +702,13 @@ export default function App(): JSX.Element {
         </div>
       </header>
 
-      <Warnings
-        derivedAlerts={stableDerivedAlerts}
-        warnings={state.warnings}
-        onClear={onClearWarnings}
-      />
+      <ErrorBoundary sectionLabel="Warnings">
+        <Warnings
+          derivedAlerts={stableDerivedAlerts}
+          warnings={state.warnings}
+          onClear={onClearWarnings}
+        />
+      </ErrorBoundary>
 
       <main className="main-grid">
         <ControlPanel
@@ -721,36 +724,42 @@ export default function App(): JSX.Element {
         />
 
         <div className="right-column">
-          <VideoPanel
-            latestTel={state.latestTel}
-            latestVis={state.latestVis}
-            overlaySource={overlaySource}
-            videoUrl={backendConfig.videoUrl}
-          />
+          <ErrorBoundary sectionLabel="Video">
+            <VideoPanel
+              latestTel={state.latestTel}
+              latestVis={state.latestVis}
+              overlaySource={overlaySource}
+              videoUrl={backendConfig.videoUrl}
+            />
+          </ErrorBoundary>
 
-          <TrackingSummary
-            overlaySource={overlaySource}
-            trackingState={selectedTracking.trackingState}
-            trackingBlockedReason={trackingBlockedReason}
-            confidence={selectedTracking.confidence}
-            boundW={selectedTracking.boundW}
-            boundH={selectedTracking.boundH}
-            targetX={selectedTracking.targetX}
-            targetY={selectedTracking.targetY}
-            ageS={trackingAgeS}
-            freshThresholdS={trackingFreshThresholdS}
-            confidenceHistory={state.confidenceHistory}
-            ageHistory={state.ageHistory}
-          />
+          <ErrorBoundary sectionLabel="Tracking Summary">
+            <TrackingSummary
+              overlaySource={overlaySource}
+              trackingState={selectedTracking.trackingState}
+              trackingBlockedReason={trackingBlockedReason}
+              confidence={selectedTracking.confidence}
+              boundW={selectedTracking.boundW}
+              boundH={selectedTracking.boundH}
+              targetX={selectedTracking.targetX}
+              targetY={selectedTracking.targetY}
+              ageS={trackingAgeS}
+              freshThresholdS={trackingFreshThresholdS}
+              confidenceHistory={state.confidenceHistory}
+              ageHistory={state.ageHistory}
+            />
+          </ErrorBoundary>
 
-          <TelemetryPanel
-            linkStatus={state.linkStatus}
-            latestTel={state.latestTel}
-            latestVis={state.latestVis}
-            nowMs={nowMs}
-            linkUpdatedAtMs={state.linkUpdatedAtMs}
-            linkEnvelopeTimestampS={state.linkEnvelopeTimestampS}
-          />
+          <ErrorBoundary sectionLabel="Telemetry">
+            <TelemetryPanel
+              linkStatus={state.linkStatus}
+              latestTel={state.latestTel}
+              latestVis={state.latestVis}
+              nowMs={nowMs}
+              linkUpdatedAtMs={state.linkUpdatedAtMs}
+              linkEnvelopeTimestampS={state.linkEnvelopeTimestampS}
+            />
+          </ErrorBoundary>
         </div>
       </main>
     </div>
