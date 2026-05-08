@@ -938,4 +938,93 @@ If Eddi can move past these without John, they go in Sprint 0:
   ordering bug from `chore/bugfixes`). Branch `chore/sprint0-fc-software`
   once #23 (this one) merges.
 
+### 2026-05-07 — Eddi + Claude — S0.4 FC software fixes (`chore/sprint0-fc-software`)
+
+- Branch `chore/sprint0-fc-software` off `dev` (post-merge of
+  `chore/sprint0-network` PR #23). Nine logical commits:
+  1. `fix(fc,backend): signed-modular int32 cmd_seq comparator across the
+     wire` — new `src/fc/header/CmdSeq.h` (`fc::cmd::seq_advances`) and
+     matching `_seq_advances` in `state.py`. Closes the wrap-unsafe seq
+     filter (`int last_cmd_seq = -1` sentinel hole) on the FC and the
+     wrap-unsafe `cmd_next_seq < clamped_minimum` on the backend. Trade-off
+     captured in test docstrings: a fresh-process `CmdBridge(seq_start=high)`
+     no longer auto-bumps `cmd_next_seq` forward; operators that need that
+     for resume scenarios assign `state.cmd_next_seq` directly. New
+     `tests/fc/test_cmd_seq_wrap.cpp` (7 cases) +
+     `tests/seq_test_utils.py` wrap-aware monotonicity helpers used by
+     `test_cmd_bridge_send.py` and the two integration e2e tests in place
+     of the strict-`>` assertions. New
+     `test_ensure_cmd_seq_minimum_handles_post_wrap_state` pins the audit's
+     primary concern.
+  2. `chore(tests): add tests/__init__.py and tests/integration/__init__.py` —
+     two empty files. Closes the S0.2-noted pytest collection issue with
+     `tests.cmd_test_utils` / `tests.ws_test_utils` imports. `pytest -q
+     tests/` now works without the `--ignore-glob='*cmd_bridge_e2e*'`
+     workaround.
+  3. `fix(fc): keep current control mode on unknown desired_mode (no
+     LandSafely stomp)` — `main.cpp` no longer forces LandSafely on a CMD
+     with an unparseable `desired_mode`. Logs and keeps the current mode.
+     Schema-version skew + corrupted-byte cases no longer DoS the drone
+     into a forced landing.
+  4. `fix(fc): stale-CMD failsafe entry on transition only, not per-tick` —
+     tracks a `bool failsafe_engaged` and only calls `setControlMode(
+     LandSafely)` on the fresh→stale transition. Same end-state behaviour
+     (LandSafely while stale), but the entry is now an event, not a
+     50 Hz stomp. The full Healthy/StaleSoft/StaleHard state machine is
+     deferred to S0.7 per ADR-004.
+  5. `feat(fc): configurable FC_TEL_HOST and FC_TEL_PORT` — env-driven
+     UDP TEL destination, defaults preserve current single-host behaviour.
+     Validates port range up-front; refuses to start on invalid input
+     (mirrors the `FC_BIND_HOST` posture from `chore/sprint0-network`).
+  6. `fix(fc): publish (last_cmd, last_cmd_time_s_) atomically under
+     cmd_mutex_` — drops the `std::atomic<double>` time field, brings it
+     under the same lock as `last_cmd_`. New
+     `latest_command_with_time(out_cmd, out_time_s)` getter returns both
+     under one acquisition so `main.cpp`'s seq filter and cmd_age
+     comparison always see a coherent snapshot. New
+     `tests/fc/test_command_server_atomic.cpp` pins the negative-case
+     contract; positive-case (concurrent writer torn-read) needs friend
+     access to the writer path and is deferred to S0.6.
+  7. `fix(fc): pin LC_NUMERIC=C and imbue TEL ostringstream with classic
+     locale` — process-wide `std::setlocale(LC_NUMERIC, "C")` at
+     `main()` start + per-stream `oss.imbue(std::locale::classic())` in
+     `build_tel_json`. Smoke-tested under `LC_NUMERIC=de_DE.UTF-8`: TEL
+     UDP output uses `.` decimals throughout. New
+     `tests/fc/test_locale_safe_json.cpp` pins the imbue recipe (skips
+     gracefully on no-locale CI runners).
+  8. `chore(fc): drop runHoverSearchState dead store + comment is_armed
+     + xfail Manual+arm test` — removed `currentCommand_.yaw = DRONE_MID`
+     before `commandYawRate(...)` (overwritten unconditionally). Comment
+     on `is_armed()` documenting why the aux1>midpoint check is correct
+     and that `setArm()` is the only intended writer.
+     `tests/test_main_cmd_apply_path.py` (xfail strict=True) reproduces
+     the deferred `Manual+arm:true` ordering bug: after the S0.7 fix
+     lands, the test will XPASS and strict=True flips it to FAIL,
+     prompting marker removal.
+- **Deferred to S0.7** (HIL bench gate per ADR-004 and user-confirmed
+  scoping):
+  - The `Manual+arm:true` ordering fix itself (`main.cpp` setArm-then-
+    setControlMode swap, or the throttle-preset relocation). Test lands
+    here as xfail; the fix lands later.
+  - The full two-stage Healthy/StaleSoft/StaleHard failsafe state machine
+    + new TEL fields (`failsafe_state`, `failsafe_age_s`). Per-tick stomp
+    removal landed here as a safe subset.
+- Verification:
+  - `python -m pre_commit run --all-files` clean.
+  - `python -m pytest tests/ -q` => `124 passed, 1 skipped, 1 xfailed`.
+  - `cmake --build build -j` clean; `ctest` => 5/5 (test_rc_math,
+    test_clamp, test_cmd_seq_wrap, test_command_server_atomic,
+    test_locale_safe_json).
+  - FC binary smoke across configs (default / `FC_TEL_HOST=192.168.1.50
+    FC_TEL_PORT=9999` / `LC_NUMERIC=de_DE.UTF-8` / `FC_TEL_PORT=garbage`)
+    behaves as expected: correct startup banner, dot-decimal TEL JSON,
+    refuses on invalid inputs.
+  - Stale-CMD failsafe smoke: one `[FC] CMD link stale ... entering
+    LandSafely failsafe` log line at startup, then steady-state TEL.
+    Previously: 50 such lines per second.
+- Next session: S0.5 (vision software fixes — KCF re-init bug, real
+  confidence in TRACKING, camera reconnect with backoff, model warmup,
+  state-flicker grace, black-frame detection). Branch
+  `chore/sprint0-vision-software` once this PR merges.
+
 ### (future entries here)
