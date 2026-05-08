@@ -21,6 +21,31 @@ class SourceSpec:
         return f"{self.kind}:{self.value}"
 
 
+class _DeadCapture:
+    """Sentinel returned in place of a released cv2.VideoCapture between
+    a release+reopen failure and the next successful reopen. Always
+    reports `False, None` on read so the caller's failure path runs
+    deterministically, and `False` on `isOpened` so probes don't lie.
+
+    Without this, a failed reopen would leave `self._capture` pointing at
+    a released cv2 object — calling `.read()` on a released capture is
+    undefined behaviour in cv2 (often `(False, None)`, sometimes a hard
+    crash on the GStreamer / V4L2 backends).
+    """
+
+    def isOpened(self) -> bool:  # noqa: N802 — cv2 API
+        return False
+
+    def read(self) -> tuple[bool, np.ndarray | None]:
+        return False, None
+
+    def release(self) -> None:
+        return None
+
+
+_DEAD_CAPTURE = _DeadCapture()
+
+
 def parse_source(source: str) -> SourceSpec:
     raw = source.strip()
     if not raw:
@@ -155,6 +180,11 @@ class CameraSource:
             self._capture.release()
         except Exception:  # pragma: no cover — release is best-effort
             pass
+        # Replace with the dead sentinel so an exception (or early return)
+        # from the open path below leaves `self._capture.read()` returning
+        # a deterministic `(False, None)` rather than calling .read() on a
+        # released cv2 object — that's undefined behaviour on some backends.
+        self._capture = _DEAD_CAPTURE
 
         if backoff_s > 0.0:
             self._sleep(backoff_s)
@@ -163,6 +193,8 @@ class CameraSource:
             self._capture = self._open_capture(self.spec)
         except RuntimeError as exc:
             LOGGER.warning("%s: reopen failed: %s", self.spec.label, exc)
+            # _capture stays as _DEAD_CAPTURE so the next read() falls back
+            # into _attempt_one_reconnect cleanly, rather than blowing up.
             self._next_backoff_s = min(self._reconnect_max_s, max(backoff_s * 2.0, 0.05))
             return False, None
 

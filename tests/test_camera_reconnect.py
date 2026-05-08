@@ -150,16 +150,25 @@ def test_read_tolerates_post_open_black_frames(monkeypatch) -> None:
     assert frame is real_frame
 
 
-def test_read_returns_false_when_reopen_fails(monkeypatch) -> None:
-    """A reopen that raises (capture.isOpened()=False) leaves the source in a
-    state where the next read() retries — does not propagate the exception."""
+def test_read_returns_false_when_reopen_fails_then_retries_safely(monkeypatch) -> None:
+    """After a reopen that raises (capture.isOpened()=False), the source
+    must (a) return False without propagating the exception, (b) remain
+    callable on the next tick so the caller's loop retries, and (c) NOT
+    invoke .read() on a released cv2 object (which is undefined behaviour
+    on some backends — the _DeadCapture sentinel guards against it).
+
+    Pre-fix bug: `self._capture` was left pointing at a released cv2
+    object after reopen failure, so the second read() called .read() on
+    that released object instead of cleanly re-entering the reconnect
+    path.
+    """
     captures: list[_FakeCapture] = []
 
     def factory(_arg: Any) -> _FakeCapture:
         if not captures:
             cap = _FakeCapture(read_results=[(False, None)])
         else:
-            # Reopen fails (isOpened returns False).
+            # Every subsequent open fails (isOpened returns False).
             cap = _FakeCapture(read_results=[], is_opened_initial=False)
         captures.append(cap)
         return cap
@@ -181,6 +190,53 @@ def test_read_returns_false_when_reopen_fails(monkeypatch) -> None:
     # Backoff escalates for the next attempt without raising; the source
     # remains usable so the caller can retry on the next tick.
     assert src._next_backoff_s > initial_backoff
+    backoff_after_first = src._next_backoff_s
+
+    # Second read MUST also return cleanly — pre-fix this would call .read()
+    # on the released first capture (UB on some cv2 backends).
+    ok2, frame2 = src.read()
+    assert ok2 is False
+    assert frame2 is None
+    # Backoff escalates further, confirming the second call ran the reopen
+    # path again (instead of reading the dead sentinel forever without
+    # advancing).
+    assert src._next_backoff_s > backoff_after_first
+
+
+def test_read_treats_stale_frame_on_failure_as_failure(monkeypatch) -> None:
+    """Real cv2.VideoCapture sometimes returns `(False, last_decoded_frame)`
+    on transient failures, not strictly `(False, None)`. CameraSource must
+    treat both as failure (not a successful read of the stale frame)."""
+    real_frame = np.zeros((4, 4, 3), dtype=np.uint8)
+    stale_frame = np.ones((4, 4, 3), dtype=np.uint8)
+    captures: list[_FakeCapture] = []
+
+    def factory(_arg: Any) -> _FakeCapture:
+        if not captures:
+            # Initial open returns (False, stale_frame) — the cv2 "stale
+            # decode" pattern. CameraSource must NOT publish this as a
+            # successful read.
+            cap = _FakeCapture(read_results=[(False, stale_frame)])
+        else:
+            cap = _FakeCapture(read_results=[(True, real_frame)])
+        captures.append(cap)
+        return cap
+
+    _install_fake_cv2(monkeypatch, factory)
+
+    src = CameraSource(
+        SourceSpec(kind="webcam", value="0"),
+        reconnect_initial_s=0.0,
+        reconnect_max_s=0.0,
+        black_frames_after_open=0,
+        sleep=_silent_sleep,
+    )
+
+    ok, frame = src.read()
+    # Reconnect kicked in (stale_frame did not fool the False check),
+    # second open returned the real frame.
+    assert ok is True
+    assert frame is real_frame
 
 
 def test_backoff_resets_after_successful_read(monkeypatch) -> None:
