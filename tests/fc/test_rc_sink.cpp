@@ -7,9 +7,15 @@
 #include "RcSink.h"
 #include "test_assert.h"
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -118,11 +124,110 @@ void test_recording_sink_creates_missing_log_dir() {
     std::system(("rm -rf " + make_temp_subdir("rec_nested")).c_str());
 }
 
+// Bind a UDP socket to a kernel-assigned ephemeral port so the test
+// doesn't fight with whatever else is on the box. Returns the fd and
+// fills *out_port with the assigned port number.
+int bind_loopback_listener(int* out_port) {
+    int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
+    TEST_ASSERT(fd >= 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(0); // kernel picks
+    inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+    TEST_ASSERT(::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+
+    sockaddr_in bound{};
+    socklen_t len = sizeof(bound);
+    TEST_ASSERT(::getsockname(fd, reinterpret_cast<sockaddr*>(&bound), &len) == 0);
+    *out_port = ntohs(bound.sin_port);
+    return fd;
+}
+
+void test_fake_sink_sends_self_contained_json_datagram() {
+    int port = 0;
+    const int listener = bind_loopback_listener(&port);
+
+    {
+        fc::FakeBetaflightSink sink("127.0.0.1", port);
+        TEST_ASSERT(sink.ok());
+        TEST_ASSERT(sink.name() == "fake");
+        TEST_ASSERT(sink.frames_sent() == 0U);
+
+        fc::BetaFlightCommand cmd = makeNeutralCommand();
+        cmd.throttle = 1234;
+        sink.writeChannels(cmd, 0.020);
+
+        TEST_ASSERT(sink.frames_sent() == 1U);
+        TEST_ASSERT(sink.frames_dropped() == 0U);
+    }
+
+    // Receive the datagram. It will be in flight before the sink is
+    // destroyed because UDP sendto is synchronous to the kernel buffer.
+    char buf[512] = {0};
+    const ssize_t got = ::recv(listener, buf, sizeof(buf) - 1, 0);
+    TEST_ASSERT(got > 0);
+    buf[got] = '\0';
+
+    const std::string s(buf);
+    // Strict-substring assertions for stability — full JSON parse would
+    // pull in a dependency this test deliberately avoids.
+    TEST_ASSERT(s.find("\"type\":\"RC\"") != std::string::npos);
+    TEST_ASSERT(s.find("\"seq\":0") != std::string::npos);
+    TEST_ASSERT(s.find("\"timestamp_s\":0.020000") != std::string::npos);
+    TEST_ASSERT(s.find("\"channels\":[1500,1500,1500,1234,1000,2000,1000,1000]") !=
+                std::string::npos);
+
+    ::close(listener);
+}
+
+void test_fake_sink_seq_advances_per_frame() {
+    int port = 0;
+    const int listener = bind_loopback_listener(&port);
+
+    fc::FakeBetaflightSink sink("127.0.0.1", port);
+    TEST_ASSERT(sink.ok());
+
+    fc::BetaFlightCommand cmd = makeNeutralCommand();
+    sink.writeChannels(cmd, 0.0);
+    sink.writeChannels(cmd, 0.020);
+    sink.writeChannels(cmd, 0.040);
+
+    // Drain three datagrams; assert seq=0, 1, 2.
+    for (std::uint64_t expected = 0; expected < 3; ++expected) {
+        char buf[512] = {0};
+        const ssize_t got = ::recv(listener, buf, sizeof(buf) - 1, 0);
+        TEST_ASSERT(got > 0);
+        buf[got] = '\0';
+        const std::string needle = "\"seq\":" + std::to_string(expected);
+        TEST_ASSERT(std::string(buf).find(needle) != std::string::npos);
+    }
+    TEST_ASSERT(sink.frames_sent() == 3U);
+
+    ::close(listener);
+}
+
+void test_fake_sink_rejects_invalid_host_and_port() {
+    fc::FakeBetaflightSink bad_host("not-a-valid-ip", 9101);
+    TEST_ASSERT(!bad_host.ok());
+
+    fc::FakeBetaflightSink bad_port_lo("127.0.0.1", 0);
+    TEST_ASSERT(!bad_port_lo.ok());
+
+    fc::FakeBetaflightSink bad_port_hi("127.0.0.1", 65536);
+    TEST_ASSERT(!bad_port_hi.ok());
+
+    fc::FakeBetaflightSink bad_port_neg("127.0.0.1", -1);
+    TEST_ASSERT(!bad_port_neg.ok());
+}
+
 } // namespace
 
 int main() {
     test_null_sink_smoke();
     test_recording_sink_writes_csv_with_header_and_rows();
     test_recording_sink_creates_missing_log_dir();
+    test_fake_sink_sends_self_contained_json_datagram();
+    test_fake_sink_seq_advances_per_frame();
+    test_fake_sink_rejects_invalid_host_and_port();
     return 0;
 }

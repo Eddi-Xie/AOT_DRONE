@@ -1,10 +1,14 @@
 #include "RcSink.h"
 
+#include <arpa/inet.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 #include <cerrno>
 #include <chrono>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <iostream>
@@ -105,6 +109,75 @@ void RecordingSink::writeChannels(const BetaFlightCommand& cmd, double timestamp
     // negligible relative to the diagnostic value.
     std::fflush(file_);
     ++rows_written_;
+}
+
+FakeBetaflightSink::FakeBetaflightSink(const std::string& host, int port)
+    : host_(host), port_(port) {
+    if (port <= 0 || port > 65535) {
+        std::cerr << "[FC] FakeBetaflightSink: port " << port << " out of range [1, 65535]\n";
+        return;
+    }
+    sockaddr_in probe{};
+    if (inet_pton(AF_INET, host_.c_str(), &probe.sin_addr) != 1) {
+        std::cerr << "[FC] FakeBetaflightSink: invalid host '" << host_
+                  << "', expected dotted-quad IPv4 literal (e.g. 127.0.0.1)\n";
+        return;
+    }
+
+    socket_fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (socket_fd_ < 0) {
+        std::cerr << "[FC] FakeBetaflightSink: socket() failed: " << std::strerror(errno) << "\n";
+        return;
+    }
+    std::cout << "[FC] FakeBetaflightSink dest=" << host_ << ":" << port_ << "\n";
+}
+
+FakeBetaflightSink::~FakeBetaflightSink() {
+    if (socket_fd_ >= 0) {
+        ::close(socket_fd_);
+        socket_fd_ = -1;
+    }
+}
+
+void FakeBetaflightSink::writeChannels(const BetaFlightCommand& cmd, double timestamp_s) {
+    if (socket_fd_ < 0) {
+        return;
+    }
+
+    // Self-contained JSON per-datagram. snprintf to a stack buffer keeps
+    // the fast path allocation-free; the worst-case length with all
+    // 6-digit channels and a wide timestamp is ~150 bytes, well under
+    // the 256-byte buffer.
+    char buf[256];
+    const int n = std::snprintf(buf, sizeof(buf),
+                                "{\"type\":\"RC\",\"seq\":%llu,\"timestamp_s\":%.6f,"
+                                "\"channels\":[%u,%u,%u,%u,%u,%u,%u,%u]}",
+                                static_cast<unsigned long long>(seq_), timestamp_s,
+                                static_cast<unsigned>(cmd.roll), static_cast<unsigned>(cmd.pitch),
+                                static_cast<unsigned>(cmd.yaw), static_cast<unsigned>(cmd.throttle),
+                                static_cast<unsigned>(cmd.aux1), static_cast<unsigned>(cmd.aux2),
+                                static_cast<unsigned>(cmd.aux3), static_cast<unsigned>(cmd.aux4));
+    if (n <= 0 || static_cast<std::size_t>(n) >= sizeof(buf)) {
+        // Should be impossible at the documented channel ranges; treat
+        // as a soft drop and keep going.
+        ++frames_dropped_;
+        return;
+    }
+
+    sockaddr_in dst{};
+    dst.sin_family = AF_INET;
+    dst.sin_port = htons(static_cast<std::uint16_t>(port_));
+    inet_pton(AF_INET, host_.c_str(), &dst.sin_addr); // validated in ctor
+
+    const ssize_t sent = ::sendto(socket_fd_, buf, static_cast<std::size_t>(n),
+                                  /*flags=*/0, reinterpret_cast<sockaddr*>(&dst), sizeof(dst));
+    if (sent < 0) {
+        // EAGAIN / ENOBUFS / EINTR: tolerate, count, keep going.
+        ++frames_dropped_;
+        return;
+    }
+    ++frames_sent_;
+    ++seq_;
 }
 
 } // namespace fc

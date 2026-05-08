@@ -190,6 +190,28 @@ std::unique_ptr<fc::IRcSink> make_rc_sink_from_env() {
         }
         return sink;
     }
+    if (sink_kind == "fake") {
+        const char* host_env = std::getenv("FC_RC_FAKE_HOST");
+        const std::string host =
+            (host_env && *host_env) ? std::string(host_env) : std::string("127.0.0.1");
+        const char* port_env = std::getenv("FC_RC_FAKE_PORT");
+        int port = 9101;
+        if (port_env && *port_env) {
+            const char* end = port_env + std::strlen(port_env);
+            auto [ptr, ec] = std::from_chars(port_env, end, port);
+            if (ec != std::errc{} || ptr != end || port <= 0 || port > 65535) {
+                std::cerr << "[FC] Invalid FC_RC_FAKE_PORT='" << port_env
+                          << "', refusing to start (must be a base-10 integer in [1, 65535])\n";
+                return nullptr;
+            }
+        }
+        auto sink = std::make_unique<fc::FakeBetaflightSink>(host, port);
+        if (!sink->ok()) {
+            std::cerr << "[FC] FakeBetaflightSink failed to open UDP socket. Refusing to start.\n";
+            return nullptr;
+        }
+        return sink;
+    }
     if (sink_kind == "msp") {
         std::cerr << "[FC] FC_RC_SINK=msp is reserved for S0.8 (USB MSP driver) and is not yet "
                      "implemented. Use 'null', 'recording', or 'fake' for now.\n";

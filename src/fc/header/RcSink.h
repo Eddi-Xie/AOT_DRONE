@@ -103,4 +103,46 @@ class RecordingSink final : public IRcSink {
     std::uint64_t rows_written_ = 0;
 };
 
+// UDP echoes every channel write as a self-contained JSON datagram to a
+// configured host:port. The Python harness (scripts/dev/
+// fake_betaflight_listener.py) consumes these and asserts expected
+// sequences for HIL replay tests.
+//
+// Datagram format (one frame per writeChannels):
+//   {"type":"RC","seq":<u64>,"timestamp_s":<f>,"channels":[r,p,y,t,a1,a2,a3,a4]}
+// Self-contained per-frame so packet loss is non-fatal — consumers fall
+// forward without waiting for retransmits, matching the TEL/VIS UDP
+// design.
+//
+// Errors are logged-but-tolerated: a transient EAGAIN / ENOBUFS does
+// NOT take ok() to false. ok() flips false only when the socket can't
+// be opened at construction (operator-fixable config error).
+class FakeBetaflightSink final : public IRcSink {
+  public:
+    // host: dotted-quad IPv4 literal (matches FC_TEL_HOST validation).
+    // port: 1..65535.
+    FakeBetaflightSink(const std::string& host, int port);
+    ~FakeBetaflightSink() override;
+
+    FakeBetaflightSink(const FakeBetaflightSink&) = delete;
+    FakeBetaflightSink& operator=(const FakeBetaflightSink&) = delete;
+
+    void writeChannels(const BetaFlightCommand& cmd, double timestamp_s) override;
+    bool ok() const override { return socket_fd_ >= 0; }
+    std::string name() const override { return "fake"; }
+
+    // Test/diagnostic accessors.
+    std::uint64_t frames_sent() const { return frames_sent_; }
+    std::uint64_t frames_dropped() const { return frames_dropped_; }
+    int port() const { return port_; }
+
+  private:
+    std::string host_;
+    int port_ = 0;
+    int socket_fd_ = -1;
+    std::uint64_t seq_ = 0;
+    std::uint64_t frames_sent_ = 0;
+    std::uint64_t frames_dropped_ = 0;
+};
+
 } // namespace fc
