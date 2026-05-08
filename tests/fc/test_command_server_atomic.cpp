@@ -1,20 +1,21 @@
-// Tests that CommandServer publishes (last_cmd, last_cmd_time_s_) atomically
-// under cmd_mutex_. The previous design stored `last_cmd_time_s_` as a
-// std::atomic<double> *outside* the lock, so a reader running between the
-// lock release and the atomic store could observe the new last_cmd_ paired
-// with the previous timestamp — a torn read of the (cmd, time) pair.
+// Smoke tests for the new `latest_command_with_time` getter on
+// CommandServer. The full atomic-publish contract — that
+// (last_cmd_, last_cmd_time_s_) is always a coherent snapshot under
+// cmd_mutex_ — is enforced by the writer-side change (both fields now
+// land inside the same lock guard, replacing the previous design where
+// last_cmd_time_s_ was a separate std::atomic<double> stored outside the
+// mutex). A genuine torn-read test against a concurrent writer would
+// require either a friend hook on CommandServer or a real TCP harness;
+// both are deferred to S0.6.
 //
-// We can't drive CommandServer's TCP path easily from a unit test (would
-// require socket plumbing), so instead the test exercises the public
-// `latest_command_with_time` getter against the writer path indirectly: we
-// stage a sequence of CommandFrames + monotonic times by directly calling
-// the (now-mutex-guarded) publish path. This pins the contract that the
-// pair is always consistent.
+// What this file actually pins (the negative-case contract):
+//  - The getter is safely callable on a never-started CommandServer.
+//  - Calling it concurrently with other operations on the server doesn't
+//    produce UB, doesn't crash, and never writes a non-zero time_s into
+//    the out param when it returns false.
 //
-// Concretely we drive a writer thread that flips between two distinct
-// (seq, time) pairs many times; a reader thread snapshots and asserts the
-// pair always matches one of the two valid combinations. A torn read would
-// produce a (seq_A, time_B) pair that's neither.
+// If main.cpp were to misread the API and depend on out_time_s being
+// touched on the false-return path, this test would catch the misuse.
 
 #include "CmdSeq.h"
 #include "CommandReceiver.h"
@@ -55,13 +56,14 @@ void test_getter_returns_false_before_any_cmd() {
     // doesn't crash and the getter is callable in a fresh state.
 }
 
-// Concurrent-snapshot test using a synthetic publisher pair. We can't reach
-// the writer path from outside, so we approximate: hammer
-// `latest_command_with_time` from one thread while another thread is
-// (separately) starting/stopping the server lifecycle. A proper torn-read
-// test would require a friend hook — added in S0.6 if we promote this
-// suite. For now the test pins that the getter is callable concurrently
-// with other server operations without UB.
+// Thread-safety smoke for the never-published case. We can't reach the
+// writer path from outside (no friend hook on CommandServer), so this test
+// only exercises the *negative* path: hammer `latest_command_with_time`
+// from a reader thread on a never-started server and verify the getter is
+// safely callable concurrently — no UB, no crash, and crucially out_time_s
+// is never written when the function returns false. A genuine torn-read
+// test against a concurrent writer is deferred to S0.6 (when the FC test
+// suite gains socket harnesses or a friend hook on CommandServer).
 void test_getter_safe_under_concurrent_lifecycle() {
     fc::CommandServer server(0, "127.0.0.1");
     std::atomic<bool> stop{false};

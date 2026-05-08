@@ -25,6 +25,7 @@
 #include <ios>
 #include <locale>
 #include <sstream>
+#include <string>
 
 namespace {
 
