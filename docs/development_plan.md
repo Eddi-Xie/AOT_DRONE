@@ -222,19 +222,19 @@ Priority within Sprint 0: P0 → P1 → P2. P0 must be green by May 11; P1 shoul
 
 ### S0.6 — Webapp software fixes (high-impact)
 
-- [ ] **Top-level error boundary** (`src/webapp/src/main.tsx:1-11`, B1):
+- [x] **Top-level error boundary** (`src/webapp/src/main.tsx:1-11`, B1):
   - Class-based boundary wrapping `<App />` with fallback panel + reload button.
   - Per-section boundaries on `<VideoPanel>`, `<TelemetryPanel>`, `<TrackingSummary>`, `<Warnings>`.
-- [ ] **Real schema validation on WS envelopes** (`src/webapp/src/types.ts:233-245`, B7):
+- [x] **Real schema validation on WS envelopes** (`src/webapp/src/types.ts:233-245`, B7):
   - Replace `value as TelUpdate` with field-by-field guards.
   - One-shot in-UI warning on shape mismatch per session.
   - Validate `confidence ∈ [0,1]`, `target_x/y ∈ [-1,1]`, `bound_w/h ∈ [0,1]`.
-- [ ] **WS reconnect jitter + longer ceiling** (`src/webapp/src/ws.ts:162-173`, B2): ±30% jitter; 15 s ceiling.
-- [ ] **WS heartbeat watchdog** (B15): if no message received for `2 * vis_fresh_s + 0.5s`, force close & reconnect.
-- [ ] **Age sparkline range** (`src/webapp/src/components/TrackingSummary.tsx:147-153`, B10): replace `min=0,max=1` with `max = freshThresholdS * 4`.
-- [ ] **Log WS errors** (`ws.ts:113-117`, B3): include URL + timestamp + close code; surface "WS error" warning after 3+ consecutive errors.
-- [ ] **Use `projectAge` for accent badges** (`TelemetryPanel.tsx:262-268`, B11) instead of raw `vis_age_s`.
-- [ ] **Acceptance:** `npm --prefix src/webapp run test` green; manual smoke: kill backend mid-stream → UI shows fallback within 2 s.
+- [x] **WS reconnect jitter + longer ceiling** (`src/webapp/src/ws.ts:162-173`, B2): ±30% jitter; 15 s ceiling.
+- [x] **WS heartbeat watchdog** (B15): if no message received for `2 * vis_fresh_s + 0.5s`, force close & reconnect.
+- [x] **Age sparkline range** (`src/webapp/src/components/TrackingSummary.tsx:147-153`, B10): replace `min=0,max=1` with `max = freshThresholdS * 4`.
+- [x] **Log WS errors** (`ws.ts:113-117`, B3): include URL + timestamp + close code; surface "WS error" warning after 3+ consecutive errors.
+- [x] **Use `projectAge` for accent badges** (`TelemetryPanel.tsx:262-268`, B11) instead of raw `vis_age_s`.
+- [x] **Acceptance:** `npm --prefix src/webapp run test` green; manual smoke: kill backend mid-stream → UI shows fallback within 2 s.
 
 ### S0.7 — HIL bench scaffold (`IRcSink` abstraction)
 
@@ -1150,5 +1150,93 @@ If Eddi can move past these without John, they go in Sprint 0:
   - `vision/main.py` LOGGER vs print sweep — style cleanup.
   - Webapp `is-low` threshold realignment — moot now that the floor is
     0.5 (matches the threshold).
+
+### 2026-05-07 — Eddi + Claude — S0.6 webapp software fixes (`chore/sprint0-webapp-software`)
+
+- Branch `chore/sprint0-webapp-software` off `dev` (post-merge of
+  `chore/sprint0-vision-software` PR #25, head `dd4975f`). Seven
+  logical commits + Progress Log:
+  1. `feat(webapp): real schema + range validation on WS envelopes` —
+     replaces the literal `value as TelUpdate` cast (audit B7) with
+     field-by-field guards (`Number.isFinite`-gated via `readNumber`
+     plus per-field range checks: `confidence ∈ [0,1]`, `target_x/y`
+     and `loc_x/y ∈ [-1,1]`, `bound_w/h ∈ [0,1]`, enum gates on
+     `tracking_state` and `control_mode`). New `parseTelUpdate` /
+     `parseVisUpdate` return `{ value, mismatch }`; the legacy
+     `asTelUpdate` / `asVisUpdate` become thin wrappers so external
+     imports keep working. App.tsx surfaces a sticky session-scoped
+     "Schema mismatch — backend update needed" derived alert on first
+     mismatch. 14 unit tests in `src/webapp/src/types.test.ts`.
+  2. `feat(webapp): top-level + per-section error boundary` (audit B1)
+     — new `ErrorBoundary` class component with `top-level`
+     (full-page reload fallback) and `section` (in-grid retry
+     fallback) variants. `main.tsx` wraps `<App />`; `App.tsx` wraps
+     `<Warnings>`, `<VideoPanel>`, `<TrackingSummary>`, `<TelemetryPanel>`.
+     `<ControlPanel>` intentionally not boundaried — the operator's
+     only safety override should not be hidden by a partial-render
+     fallback (top-level catches if it crashes). Tests use
+     `react-dom/server`'s `renderToString` on a primed-state subclass
+     to verify fallback markup without needing `@testing-library/react`
+     or `jsdom` — keeps devDeps unchanged.
+  3. `fix(webapp): WS reconnect ±30% jitter + 15 s ceiling` (audit B2) —
+     `scheduleReconnect` jitters via `0.7 + 0.6 * rng()`; default
+     `maxBackoffMs` raised 5000 → 15000. Constructor accepts an
+     optional `rng` for deterministic tests. Switched
+     `window.setTimeout` / `window.clearTimeout` to the unscoped
+     globals so the module is testable in vitest's default node
+     runtime without `jsdom`.
+  4. `feat(webapp): WS heartbeat watchdog forces reconnect on silence`
+     (audit B15) — every `onopen`/`onmessage` rearms a
+     `setTimeout(closeWs, heartbeatTimeoutMs)`. Default 1000 ms; new
+     public `setHeartbeatTimeoutMs(ms)` lets the App tighten the
+     watchdog to `(2 * vis_fresh_s + 0.5) * 1000` whenever
+     `LINK_STATUS.vis_fresh_s` updates.
+  5. `fix(webapp): structured WS error logs + 3x consecutive-error
+     alert` (audit B3) — exported `WsTransportEvent` (kind=`error` |
+     `abnormal_close`, url, timestampMs, code?, consecutiveErrors).
+     `console.error` logged on every error / abnormal-close event;
+     counter resets on next clean `onopen`. App.tsx surfaces a
+     "WS transport unstable (N consecutive errors)" derived alert at
+     ≥3.
+  6. `fix(webapp): age sparkline scaled to ageThreshold * 4`
+     (audit B10) — `TrackingSummary.tsx` age-history sparkline `max`
+     prop now uses `Math.max(0.05, ageThreshold * 4)` so the visible
+     band tracks the same threshold the body label calls out
+     (`fresh < ...`). 0.05 floor guards future refactors.
+  7. `fix(webapp): TelemetryPanel uses projectAge for vision accent +
+     dedup` (audit B11) — Vision-Link card accent now compares the
+     `projectAge`-projected `vis_age_s` against `vis_fresh_s` (was raw
+     `linkStatus.vis_age_s`, which stayed below the threshold for a
+     window after the stream actually died). Drops the duplicate local
+     `projectAge` (was at line 21 in `TelemetryPanel.tsx`, identical
+     to `utils/format.ts:11`) and imports the shared helper.
+- Verification:
+  - `npm --prefix src/webapp run test` => `46 passed, 0 failed`
+    (was 5 passed; +14 types, +5 ErrorBoundary, +16 ws, +3
+    TrackingSummary, +3 TelemetryPanel = +41 new).
+  - `npm --prefix src/webapp run build` (tsc --noEmit + vite build)
+    clean.
+  - `python -m pre_commit run --all-files` clean.
+  - `python -m pytest tests/ -q` unchanged from `dev` baseline
+    (no Python touched): `144 passed, 1 skipped, 1 xfailed`.
+  - `cmake --build build -j` + `ctest` 5/5 unchanged (no C++ touched).
+- Manual smoke (planned at PR review): start backend, open webapp,
+  `kill -9 <backend>` → fallback panel within 2 s; restart →
+  recovery in 15 s ± jitter. Schema mismatch tested via unit cases.
+- Out of scope (deferred):
+  - ADR-007 confidence-semantics doc — separate docs PR.
+  - Env-var inventory in `setup.md` (now 9+ vars across S0.3/S0.4/
+    S0.5 + new webapp `vis_fresh_s`-driven heartbeat) — separate
+    docs sweep.
+  - TRACKING-side miss-grace symmetric to TARGET_DETECTED — design
+    decision, defer to S0.15+.
+  - `vision/main.py` LOGGER-vs-print sweep — style cleanup.
+  - Webapp polish (S0.22) — explicitly P2.
+- Next session: open the PR for review. After merge, S0.7 (HIL bench
+  scaffold — `IRcSink` abstraction, `NullSink` / `RecordingSink` /
+  `FakeBetaflightSink`, `FC_RC_SINK` env, Python harness) on branch
+  `chore/sprint0-hil-bench` once this PR merges. S0.7 is the gate for
+  unblocking the deferred Manual+arm:true ordering fix from S0.4
+  (per ADR-004).
 
 ### (future entries here)
