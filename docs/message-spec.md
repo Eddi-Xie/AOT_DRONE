@@ -128,6 +128,27 @@ Semantics:
 - If tracking_state != Tracking, target_x/target_y/bound_w/bound_h/confidence should still be present.
   - Use 0.0 for target_x/target_y/bound_w/bound_h and 0.0 confidence when no target is available.
   - This 0.0 substitution is defined ONLY for these tracking-related fields.
+- TRACKING-state confidence semantics (S0.5, audit A9):
+  - On a frame where the detector produces a fresh box, confidence is the
+    detector's own confidence for that detection, clamped to [0, 1].
+  - On a tracker-only frame (the visual tracker held lock but no fresh
+    detector output), the published confidence is the previous frame's
+    value multiplied by a per-frame decay factor (default 0.95). Bounded
+    below by a configured floor (default 0.5) — but the floor only
+    clamps when the seed (last detection's confidence) was already at-or-
+    above it; below-floor seeds continue to decay freely toward zero.
+  - Cross-component contract: the FC's `trackingConfig_.minConfidence`
+    (default 0.5; `src/fc/header/FlightController.h:54`) gates whether
+    `runFollowTargetLogic` keeps following the bbox. The vision floor
+    MUST be >= FC minConfidence for the default config — otherwise long
+    tracker-only stretches will silently drop the FC into Searching/
+    hover. Both knobs (`VISION_TRACKER_ONLY_CONF_FLOOR`,
+    `VISION_TRACKER_ONLY_CONF_DECAY`) live in vision; the FC threshold
+    is currently a compile-time default but should move to a config knob
+    in a future sprint.
+  - Pre-S0.5: TRACKING-state confidence was hardcoded `1.0` regardless
+    of detector output. Consumers (UI sparkline, future logging) should
+    expect realistic values now.
 - All numeric fields MUST be finite (no NaN, no ±Inf).
 - For any required numeric field other than the tracking fields above,
   senders MUST NOT silently substitute 0.0 when a finite value is unavailable
@@ -176,12 +197,17 @@ Semantics:
 - loc_x, loc_y are normalized in [-1, 1]
   - (0, 0) is center, +x is right, +y is up
 - bound_w, bound_h are normalized in [0, 1]
-- confidence in [0, 1]
+- confidence in [0, 1] (clamped at the producer per the TRACKING-state
+  semantics above; the wire schema rejects out-of-range or non-finite
+  values).
 - If tracking_state != Tracking, set loc_x/loc_y/bound_w/bound_h/confidence to 0.0.
   - Receivers MAY accept tiny floating-point drift on the zero values
     (abs(value) <= 1e-6) and normalise such inputs to 0.0; values outside
     that tolerance MUST be treated as a schema violation and the message
     dropped + logged.
+- TRACKING-state confidence carries the same seed+decay semantics as the
+  TEL `confidence` field — see the TEL Semantics section above for the
+  full description and the vision/FC cross-component contract.
 
 Example:
 {

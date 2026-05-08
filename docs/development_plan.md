@@ -1094,4 +1094,61 @@ If Eddi can move past these without John, they go in Sprint 0:
   range guards). Branch `chore/sprint0-webapp-software` once this PR
   merges.
 
+### 2026-05-07 — Eddi + Claude — S0.5 code-review follow-ups
+
+- Three-agent code review on `chore/sprint0-vision-software` after the
+  initial 7 commits surfaced one CRITICAL and seven MAJOR findings, plus
+  a handful of nits. Seven follow-up commits in this same branch:
+  1. `fix(vision): align tracker_only_conf_floor with FC minConfidence
+     + clamp seed` — raises the default floor from 0.3 to 0.5 to match
+     `trackingConfig_.minConfidence` in `FlightController.h:54`. Pre-fix:
+     after ~14 tracker-only frames at 0.95 decay, conf reached 0.49 and
+     the FC silently dropped out of TRACKING into hover (the
+     `runFollowTargetLogic` low_confidence branch). Pre-S0.5 this never
+     fired because conf was hardcoded 1.0 — S0.5 had silently introduced
+     an in-flight behaviour change ADR-004 would normally HIL-gate. Also
+     clamps `Detection.confidence` via `clamp01` at both seed sites and
+     adds floor-vs-seed protection (floor doesn't RAISE conf above seed
+     when seed < floor).
+  2. `fix(vision): _iou NaN guard + refresh _last_tracker_bbox on high-
+     IoU + tighten _tracking_result signature` — `_iou` returns 0.0 on
+     non-finite coordinates so a NaN-poisoned detection forces re-init
+     instead of silently keeping the tracker; `_last_tracker_bbox` is
+     refreshed on every detection-frame branch (not only re-init); the
+     `conf=` parameter on `_tracking_result` is now keyword-only and
+     required.
+  3. `fix(vision): preserve capture state on reopen failure via
+     _DEAD_CAPTURE sentinel` — closes the post-reopen-fail UB where
+     `self._capture` was a released cv2 object. New `_DeadCapture`
+     sentinel returns deterministic `(False, None)` so subsequent
+     read() calls re-enter the reconnect path cleanly.
+  4. `fix(vision): YOLO warmup imgsz matches detect()'s _resolve_imgsz
+     tuple path` — warmup was using a scalar imgsz; real detect uses a
+     tuple. JIT compile happened twice. Now the warmup synthesises a
+     dummy at the production aspect ratio and routes through the same
+     `_resolve_imgsz` helper.
+  5. `fix(vision): include frame_id in black-frame warn for log
+     correlation` — small log-message addition; test asserts the
+     substring is present.
+  6. `test(vision): live-source False return triggers continue, not
+     break` — closes the test-coverage gap where no test verified that
+     `is_live=True` actually flowed through the continue path. New
+     `_LiveFakeSource` fake exposes `is_live=True`; test asserts a
+     False return is consumed without breaking the loop.
+  7. `docs(spec): document tracking-state confidence semantics + cross-
+     component contract` — adds the seed+decay+floor description to
+     `docs/message-spec.md` for both TEL and VIS, plus the
+     vision-floor >= FC-minConfidence rule.
+- New tests: 4 cases added across this round (1 IoU boundary,
+  1 low-seed-decay, 1 detector-conf-clamp, 1 stale-frame, 1 reopen-then-
+  retry, 1 live-source-continue). Total pytest now ~145 passed.
+- Deferred (review-flagged but explicitly out of scope):
+  - ADR-007 for confidence semantics — separate docs PR.
+  - Env-var inventory in `setup.md` (now 9 vars across S0.3/S0.4/S0.5).
+  - TRACKING-side miss-grace symmetric to TARGET_DETECTED's grace —
+    design decision; opening for S0.6+ scoping.
+  - `vision/main.py` LOGGER vs print sweep — style cleanup.
+  - Webapp `is-low` threshold realignment — moot now that the floor is
+    0.5 (matches the threshold).
+
 ### (future entries here)
