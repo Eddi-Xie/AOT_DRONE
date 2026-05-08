@@ -1,5 +1,17 @@
 import { WsEnvelope, WsEventType, isRecord } from "./types";
 
+export interface WsTransportEvent {
+  kind: "error" | "abnormal_close";
+  url: string;
+  timestampMs: number;
+  // Present on close events; absent for "error" since onerror gives us no code.
+  code?: number;
+  // Total consecutive transport failures observed since the last clean
+  // onopen. Lets the App surface a derived alert after a configurable
+  // threshold (S0.6 item B3 = 3).
+  consecutiveErrors: number;
+}
+
 const WS_EVENTS: WsEventType[] = ["TEL_UPDATE", "VIS_UPDATE", "LINK_STATUS", "WARNING"];
 
 function isWsEventType(value: unknown): value is WsEventType {
@@ -23,7 +35,14 @@ export function parseWsEnvelope(value: unknown): WsEnvelope | null {
     return null;
   }
 
-  if (typeof value.seq !== "number" || !Number.isFinite(value.seq)) {
+  // seq must be a finite, non-negative integer. Loose acceptance of
+  // negative or fractional values would corrupt downstream order/dedup
+  // logic that treats seq as a monotonic counter.
+  if (
+    typeof value.seq !== "number" ||
+    !Number.isInteger(value.seq) ||
+    value.seq < 0
+  ) {
     return null;
   }
 
@@ -35,7 +54,7 @@ export function parseWsEnvelope(value: unknown): WsEnvelope | null {
     event: value.event,
     data: value.data,
     timestamp_s: value.timestamp_s,
-    seq: Math.trunc(value.seq),
+    seq: value.seq,
   };
 }
 
@@ -52,6 +71,24 @@ interface ReconnectingWsClientOptions {
    * history, and referrer chains.
    */
   subprotocols?: string[];
+  /**
+   * Random source for the ±30% reconnect-jitter. Default `Math.random`.
+   * Tests inject a deterministic generator.
+   */
+  rng?: () => number;
+  /**
+   * Force-close + reconnect when no message has arrived in this many ms.
+   * Default 1000. The owning App should call `setHeartbeatTimeoutMs` once
+   * `vis_fresh_s` is known so the watchdog tracks the actual stream cadence.
+   */
+  heartbeatTimeoutMs?: number;
+  /**
+   * Notified on every onerror or abnormal close (close.code !== 1000).
+   * Receives a `consecutiveErrors` counter that resets on the next clean
+   * onopen — so the App can decide to escalate to a derived warning after
+   * N back-to-back failures.
+   */
+  onTransportEvent?: (event: WsTransportEvent) => void;
 }
 
 export class ReconnectingWsClient {
@@ -61,23 +98,46 @@ export class ReconnectingWsClient {
   private readonly minBackoffMs: number;
   private readonly maxBackoffMs: number;
   private readonly subprotocols: string[] | undefined;
+  private readonly rng: () => number;
 
   private ws: WebSocket | null = null;
-  private reconnectTimerId: number | null = null;
+  private reconnectTimerId: ReturnType<typeof setTimeout> | null = null;
   private reconnectDelayMs: number;
   private active = false;
   private connected = false;
+  private heartbeatTimeoutMs: number;
+  private heartbeatTimerId: ReturnType<typeof setTimeout> | null = null;
+  private readonly onTransportEvent: ((event: WsTransportEvent) => void) | undefined;
+  private consecutiveErrors = 0;
+  // Set true by onerror; cleared on each new connect(). Prevents the
+  // onclose handler from double-counting the same lifecycle's failure
+  // (onerror -> ws.close() -> onclose with abnormal code, which would
+  // otherwise bump the counter twice for one real failure).
+  private errorAlreadyCounted = false;
 
   constructor(options: ReconnectingWsClientOptions) {
     this.url = options.url;
     this.onEnvelope = options.onEnvelope;
     this.onConnectionChange = options.onConnectionChange;
     this.minBackoffMs = options.minBackoffMs ?? 500;
-    this.maxBackoffMs = options.maxBackoffMs ?? 5000;
+    this.maxBackoffMs = options.maxBackoffMs ?? 15000;
     this.subprotocols = options.subprotocols && options.subprotocols.length > 0
       ? [...options.subprotocols]
       : undefined;
+    this.rng = options.rng ?? Math.random;
+    this.heartbeatTimeoutMs = options.heartbeatTimeoutMs ?? 1000;
+    this.onTransportEvent = options.onTransportEvent;
     this.reconnectDelayMs = this.minBackoffMs;
+  }
+
+  setHeartbeatTimeoutMs(timeoutMs: number): void {
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      return;
+    }
+    this.heartbeatTimeoutMs = timeoutMs;
+    if (this.heartbeatTimerId !== null) {
+      this.armHeartbeat();
+    }
   }
 
   start(): void {
@@ -91,8 +151,20 @@ export class ReconnectingWsClient {
   stop(): void {
     this.active = false;
     this.clearReconnectTimer();
+    this.clearHeartbeatTimer();
     if (this.ws !== null) {
-      this.ws.close();
+      // Detach listeners before close() so any late-fired event from the
+      // already-detached socket can't run our handlers (they are gated
+      // on `this.active`, but belt-and-braces: the gate prevents the
+      // counter bump; nulling the handlers stops the late callback
+      // entirely).
+      this.ws.onopen = null;
+      this.ws.onmessage = null;
+      this.ws.onerror = null;
+      this.ws.onclose = null;
+      // Pass an explicit clean-close code so any attached observers see a
+      // 1000 rather than a synthetic abnormal-close.
+      this.ws.close(1000, "client stop");
       this.ws = null;
     }
     this.setConnected(false);
@@ -104,37 +176,121 @@ export class ReconnectingWsClient {
     }
 
     this.clearReconnectTimer();
+    // Defense-in-depth: each new connect() starts with no live heartbeat
+    // timer. onclose normally clears it, but a future code path could miss
+    // that and silently leak a timer pointing at a dead socket.
+    this.clearHeartbeatTimer();
+    this.errorAlreadyCounted = false;
 
     try {
       this.ws = this.subprotocols
         ? new WebSocket(this.url, this.subprotocols)
         : new WebSocket(this.url);
     } catch {
+      // Misconfigured wsUrl / invalid subprotocol header / DNS-resolved
+      // host with bad scheme: the WebSocket constructor synchronously
+      // throws. Treat it as a transport failure so the operator-facing
+      // 3x-consecutive alert can fire, instead of silently retry-looping.
+      this.consecutiveErrors += 1;
+      const payload: WsTransportEvent = {
+        kind: "error",
+        url: this.url,
+        timestampMs: Date.now(),
+        consecutiveErrors: this.consecutiveErrors,
+      };
+      console.error("[ReconnectingWsClient] constructor threw", payload);
+      this.onTransportEvent?.(payload);
       this.scheduleReconnect();
       return;
     }
 
     this.ws.onopen = () => {
+      if (!this.active) {
+        return;
+      }
       this.reconnectDelayMs = this.minBackoffMs;
+      this.consecutiveErrors = 0;
+      this.errorAlreadyCounted = false;
       this.setConnected(true);
+      this.armHeartbeat();
     };
 
     this.ws.onmessage = (event: MessageEvent<unknown>) => {
+      // Late frames after stop() must not re-arm the heartbeat or hand
+      // payloads to a torn-down App.
+      if (!this.active) {
+        return;
+      }
+      this.armHeartbeat();
       this.handleMessage(event.data);
     };
 
     this.ws.onerror = () => {
+      // Active gate: stop() may have triggered the underlying error.
+      // Don't escalate operator-visible state on a deliberate teardown.
+      if (!this.active) {
+        return;
+      }
+      this.consecutiveErrors += 1;
+      this.errorAlreadyCounted = true;
+      const payload: WsTransportEvent = {
+        kind: "error",
+        url: this.url,
+        timestampMs: Date.now(),
+        consecutiveErrors: this.consecutiveErrors,
+      };
+      console.error("[ReconnectingWsClient] transport error", payload);
+      this.onTransportEvent?.(payload);
+      // Flip the connection state immediately. onclose normally also
+      // calls setConnected(false), but if the browser/proxy drops onclose
+      // (rare but observed in flaky HTTP/2 multiplexers), without this
+      // call the UI would stay "connected" against a dead socket. The
+      // setConnected guard makes a duplicate call from onclose a no-op.
+      this.setConnected(false);
+      // Leave the heartbeat timer armed — its body now contains the
+      // dropped-onclose recovery path (see armHeartbeat). If onclose
+      // arrives normally, clearHeartbeatTimer in onclose disables the
+      // recovery branch. If onclose drops, the watchdog forces the
+      // reconnect state machine after heartbeatTimeoutMs.
       if (this.ws !== null) {
         this.ws.close();
       }
     };
 
-    this.ws.onclose = () => {
+    this.ws.onclose = (event: CloseEvent) => {
+      this.clearHeartbeatTimer();
       this.ws = null;
       this.setConnected(false);
-      if (this.active) {
-        this.scheduleReconnect();
+
+      // If the App tore us down via stop(), don't surface the close as a
+      // transport failure — the browser delivers code 1005/1006 here even
+      // when WE asked for the close.
+      if (!this.active) {
+        return;
       }
+
+      const code = typeof event?.code === "number" ? event.code : undefined;
+      // Don't double-count the same lifecycle's failure: onerror already
+      // bumped the counter and dispatched the event. Code 1000 is a clean
+      // close from anywhere; treat it as not-a-failure.
+      const shouldReportFailure = !this.errorAlreadyCounted && code !== 1000;
+      if (shouldReportFailure) {
+        this.consecutiveErrors += 1;
+        const payload: WsTransportEvent = {
+          kind: "abnormal_close",
+          url: this.url,
+          timestampMs: Date.now(),
+          code,
+          consecutiveErrors: this.consecutiveErrors,
+        };
+        console.error("[ReconnectingWsClient] abnormal close", payload);
+        this.onTransportEvent?.(payload);
+      }
+      // Each lifecycle owns its own flag; reset for the next connect()
+      // so the seen-error state can never leak forward across attempts.
+      this.errorAlreadyCounted = false;
+
+      this.scheduleReconnect();
     };
   }
 
@@ -177,10 +333,17 @@ export class ReconnectingWsClient {
       return;
     }
 
-    this.reconnectTimerId = window.setTimeout(() => {
+    // ±30% jitter spreads reconnects across a fleet so a flapping backend
+    // doesn't see a thundering-herd retry on every restart.
+    const jitterFactor = 0.7 + 0.6 * this.rng();
+    const jitteredMs = Math.max(0, Math.round(this.reconnectDelayMs * jitterFactor));
+
+    // setTimeout is available in browsers and the test runtime alike;
+    // bypassing `window.` keeps this testable without jsdom.
+    this.reconnectTimerId = setTimeout(() => {
       this.reconnectTimerId = null;
       this.connect();
-    }, this.reconnectDelayMs);
+    }, jitteredMs);
 
     this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, this.maxBackoffMs);
   }
@@ -190,8 +353,42 @@ export class ReconnectingWsClient {
       return;
     }
 
-    window.clearTimeout(this.reconnectTimerId);
+    clearTimeout(this.reconnectTimerId);
     this.reconnectTimerId = null;
+  }
+
+  private armHeartbeat(): void {
+    this.clearHeartbeatTimer();
+    if (!this.active) {
+      return;
+    }
+    this.heartbeatTimerId = setTimeout(() => {
+      this.heartbeatTimerId = null;
+      if (this.ws === null) {
+        return;
+      }
+      this.ws.close();
+      // Recovery path for dropped onclose: if onerror already fired but
+      // the matching onclose was dropped by a flaky proxy / HTTP/2 mux,
+      // the close() above is a no-op (socket is already CLOSING) and
+      // onclose will never run, so the existing reconnect path inside
+      // onclose can never fire. Detect that case by errorAlreadyCounted
+      // still being set, and force the recovery state machine here.
+      if (this.errorAlreadyCounted) {
+        this.ws = null;
+        this.setConnected(false);
+        this.errorAlreadyCounted = false;
+        this.scheduleReconnect();
+      }
+    }, this.heartbeatTimeoutMs);
+  }
+
+  private clearHeartbeatTimer(): void {
+    if (this.heartbeatTimerId === null) {
+      return;
+    }
+    clearTimeout(this.heartbeatTimerId);
+    this.heartbeatTimerId = null;
   }
 
   private setConnected(nextConnected: boolean): void {

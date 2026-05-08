@@ -8,6 +8,7 @@ import {
   toControlModeName,
   toTrackingStateName,
 } from "../types";
+import { projectAge } from "../utils/format";
 
 interface TelemetryPanelProps {
   linkStatus: LinkStatus | null;
@@ -16,23 +17,15 @@ interface TelemetryPanelProps {
   nowMs: number;
   linkUpdatedAtMs: number | null;
   linkEnvelopeTimestampS: number | null;
-}
-
-function projectAge(
-  snapshotAgeS: number | null,
-  snapshotAtMs: number | null,
-  nowMs: number,
-): number | null {
-  if (snapshotAgeS === null) {
-    return null;
-  }
-
-  if (snapshotAtMs === null) {
-    return snapshotAgeS;
-  }
-
-  const elapsedS = Math.max(0, (nowMs - snapshotAtMs) / 1000);
-  return snapshotAgeS + elapsedS;
+  // Pre-projected vis_age (snapshot age + elapsed since LINK_STATUS arrival),
+  // hoisted from App so the value is computed once per render rather than
+  // recomputed in three places (App-level alerts, this body, the
+  // buildVisionRows helper).
+  projectedVisAgeS: number | null;
+  // App-level fresh threshold with the per-overlay default already applied.
+  // Reading raw linkStatus.vis_fresh_s here would diverge from the App-level
+  // alert when the wire value is 0 / missing — both must use the same value.
+  visFreshThresholdS: number;
 }
 
 function buildFcRows(
@@ -75,14 +68,12 @@ function buildFcRows(
 
 function buildVisionRows(
   linkStatus: LinkStatus | null,
-  nowMs: number,
-  linkUpdatedAtMs: number | null,
+  visAgeS: number | null,
 ): StatusRow[] {
   if (linkStatus === null) {
     return [];
   }
 
-  const visAgeS = projectAge(readNumber(linkStatus.vis_age_s), linkUpdatedAtMs, nowMs);
   const drops = [
     `o:${linkStatus.vis_drop_reason_oversize}`,
     `j:${linkStatus.vis_drop_reason_json}`,
@@ -244,7 +235,14 @@ export default function TelemetryPanel({
   nowMs,
   linkUpdatedAtMs,
   linkEnvelopeTimestampS,
+  projectedVisAgeS,
+  visFreshThresholdS,
 }: TelemetryPanelProps): JSX.Element {
+  // Accent uses the App-projected vis_age + the App-resolved threshold so
+  // it agrees with the App-level vis-stale derived alert.
+  const visAccent =
+    projectedVisAgeS !== null && projectedVisAgeS > visFreshThresholdS ? "warn" : "neutral";
+
   return (
     <section className="panel telemetry-panel">
       <h2>Status &amp; Telemetry</h2>
@@ -258,14 +256,8 @@ export default function TelemetryPanel({
 
         <StatusCard
           title="Vision Link"
-          rows={buildVisionRows(linkStatus, nowMs, linkUpdatedAtMs)}
-          accent={
-            linkStatus !== null &&
-            linkStatus.vis_age_s !== null &&
-            linkStatus.vis_age_s > linkStatus.vis_fresh_s
-              ? "warn"
-              : "neutral"
-          }
+          rows={buildVisionRows(linkStatus, projectedVisAgeS)}
+          accent={visAccent}
         />
 
         <StatusCard

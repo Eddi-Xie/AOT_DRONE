@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { getBackendConfig, postIntent } from "./api";
 import ControlPanel from "./components/ControlPanel";
+import ErrorBoundary from "./components/ErrorBoundary";
 import StatusBadge, { BadgeSeverity } from "./components/StatusBadge";
 import TelemetryPanel from "./components/TelemetryPanel";
 import TrackingSummary from "./components/TrackingSummary";
@@ -17,9 +18,9 @@ import {
   WarningEntry,
   WsEnvelope,
   asLinkStatus,
-  asTelUpdate,
-  asVisUpdate,
   asWarningPayload,
+  parseTelUpdate,
+  parseVisUpdate,
   formatNumber,
   readNumber,
   toControlModeName,
@@ -37,7 +38,7 @@ const DERIVED_WARNING_HOLD_MS = 1500;
 const DEFAULT_VIS_FRESH_S = 0.25;
 const DEFAULT_TEL_FRESH_S = 0.5;
 
-interface AppState {
+export interface AppState {
   wsConnected: boolean;
   lastWsMessageAtMs: number | null;
   linkStatus: LinkStatus | null;
@@ -53,9 +54,11 @@ interface AppState {
   intentPending: boolean;
   intentFeedbackKind: IntentFeedbackKind;
   intentFeedbackMessage: string;
+  schemaMismatchDetail: string | null;
+  wsConsecutiveErrors: number;
 }
 
-interface PendingStreamBatch {
+export interface PendingStreamBatch {
   linkStatus?: LinkStatus;
   linkUpdatedAtMs?: number;
   linkEnvelopeTimestampS?: number;
@@ -93,7 +96,7 @@ function areStatusAlertsEqual(a: readonly StatusAlert[], b: readonly StatusAlert
   return true;
 }
 
-type AppAction =
+export type AppAction =
   | { type: "WS_CONNECTION_CHANGED"; connected: boolean }
   | {
       type: "STREAM_BATCH";
@@ -105,6 +108,9 @@ type AppAction =
       receivedAtMs: number;
     }
   | { type: "CLEAR_WARNINGS" }
+  | { type: "SCHEMA_MISMATCH_DETECTED"; detail: string }
+  | { type: "WS_TRANSPORT_ERROR"; consecutiveErrors: number }
+  | { type: "WS_TRANSPORT_RECOVERED" }
   | { type: "SET_SELECTED_MODE"; mode: ControlMode }
   | { type: "SET_ARMED"; armed: boolean }
   | { type: "INTENT_PENDING"; message: string }
@@ -114,7 +120,7 @@ type AppAction =
       message: string;
     };
 
-const INITIAL_STATE: AppState = {
+export const INITIAL_STATE: AppState = {
   wsConnected: false,
   lastWsMessageAtMs: null,
   linkStatus: null,
@@ -130,6 +136,8 @@ const INITIAL_STATE: AppState = {
   intentPending: false,
   intentFeedbackKind: "idle",
   intentFeedbackMessage: "Ready.",
+  schemaMismatchDetail: null,
+  wsConsecutiveErrors: 0,
 };
 
 function normalizeConfidenceSample(value: number | null): number {
@@ -220,7 +228,7 @@ function selectTrackingData(
   };
 }
 
-function reducer(state: AppState, action: AppAction): AppState {
+export function reducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case "WS_CONNECTION_CHANGED":
       return {
@@ -277,6 +285,30 @@ function reducer(state: AppState, action: AppAction): AppState {
         ...state,
         warnings: [],
       };
+    case "SCHEMA_MISMATCH_DETECTED":
+      if (state.schemaMismatchDetail !== null) {
+        return state;
+      }
+      return {
+        ...state,
+        schemaMismatchDetail: action.detail,
+      };
+    case "WS_TRANSPORT_ERROR":
+      if (state.wsConsecutiveErrors === action.consecutiveErrors) {
+        return state;
+      }
+      return {
+        ...state,
+        wsConsecutiveErrors: action.consecutiveErrors,
+      };
+    case "WS_TRANSPORT_RECOVERED":
+      if (state.wsConsecutiveErrors === 0) {
+        return state;
+      }
+      return {
+        ...state,
+        wsConsecutiveErrors: 0,
+      };
     case "SET_SELECTED_MODE":
       return {
         ...state,
@@ -311,6 +343,16 @@ function formatError(error: unknown): string {
     return error.message;
   }
   return "Request failed.";
+}
+
+// Heartbeat watchdog cadence: 2x the publisher cadence + 0.5 s slack, in ms.
+// Returns null when vis_fresh_s is missing or non-positive (caller should
+// keep the previous value).
+export function heartbeatMsFromVisFresh(visFreshS: number | null): number | null {
+  if (visFreshS === null || visFreshS <= 0) {
+    return null;
+  }
+  return (2 * visFreshS + 0.5) * 1000;
 }
 
 export default function App(): JSX.Element {
@@ -395,7 +437,11 @@ export default function App(): JSX.Element {
           pending.linkEnvelopeTimestampS = envelope.timestamp_s;
         }
       } else if (envelope.event === "TEL_UPDATE") {
-        const latestTel = asTelUpdate(envelope.data);
+        const parsed = parseTelUpdate(envelope.data);
+        if (parsed.mismatch !== null) {
+          dispatch({ type: "SCHEMA_MISMATCH_DETECTED", detail: parsed.mismatch });
+        }
+        const latestTel = parsed.value;
         if (latestTel) {
           pending.latestTel = latestTel;
           if (overlaySource === "TEL") {
@@ -404,7 +450,11 @@ export default function App(): JSX.Element {
           }
         }
       } else if (envelope.event === "VIS_UPDATE") {
-        const latestVis = asVisUpdate(envelope.data);
+        const parsed = parseVisUpdate(envelope.data);
+        if (parsed.mismatch !== null) {
+          dispatch({ type: "SCHEMA_MISMATCH_DETECTED", detail: parsed.mismatch });
+        }
+        const latestVis = parsed.value;
         if (latestVis) {
           pending.latestVis = latestVis;
           if (overlaySource === "VIS") {
@@ -419,6 +469,19 @@ export default function App(): JSX.Element {
     [overlaySource, scheduleFlush],
   );
 
+  const wsClientRef = useRef<ReconnectingWsClient | null>(null);
+  // Pin the parsed-envelope handler behind a ref so the WS effect can have a
+  // stable identity in its callback without rebuilding the socket every time
+  // overlaySource (a dep of handleParsedEnvelope) changes.
+  const handleParsedEnvelopeRef = useRef(handleParsedEnvelope);
+  handleParsedEnvelopeRef.current = handleParsedEnvelope;
+  // Same trick for the watchdog cadence: the WS effect only runs on
+  // wsUrl/apiToken changes, but we want the latest learned vis_fresh_s
+  // applied to the new client immediately on construction.
+  const visFreshFromLink = readNumber(state.linkStatus?.vis_fresh_s);
+  const visFreshRef = useRef<number | null>(visFreshFromLink);
+  visFreshRef.current = visFreshFromLink;
+
   useEffect(() => {
     const wsClient = new ReconnectingWsClient({
       url: backendConfig.wsUrl,
@@ -427,23 +490,57 @@ export default function App(): JSX.Element {
         : undefined,
       onConnectionChange: (connected) => {
         dispatch({ type: "WS_CONNECTION_CHANGED", connected });
+        if (connected) {
+          dispatch({ type: "WS_TRANSPORT_RECOVERED" });
+        }
       },
       onEnvelope: (envelope) => {
-        handleParsedEnvelope(envelope);
+        handleParsedEnvelopeRef.current(envelope);
+      },
+      onTransportEvent: (event) => {
+        dispatch({ type: "WS_TRANSPORT_ERROR", consecutiveErrors: event.consecutiveErrors });
       },
       minBackoffMs: 500,
-      maxBackoffMs: 5000,
     });
 
+    // If we previously learned the cadence (e.g. wsUrl just changed and a new
+    // client is being constructed) re-apply it immediately so the new socket
+    // does not sit on the conservative 1000 ms default until the next
+    // LINK_STATUS frame arrives.
+    const seededHeartbeat = heartbeatMsFromVisFresh(visFreshRef.current);
+    if (seededHeartbeat !== null) {
+      wsClient.setHeartbeatTimeoutMs(seededHeartbeat);
+    }
+
+    wsClientRef.current = wsClient;
     wsClient.start();
 
     return () => {
       wsClient.stop();
+      wsClientRef.current = null;
       if (frameIdRef.current !== null) {
         window.cancelAnimationFrame(frameIdRef.current);
       }
+      // Drop any partially-accumulated batch so the new client's first
+      // envelope can't merge into stale (linkStatus, latestTel) from the
+      // previous wsUrl/apiToken's session and briefly surface mixed data.
+      pendingBatchRef.current = { lastMessageAtMs: null };
     };
-  }, [backendConfig.wsUrl, backendConfig.apiToken, handleParsedEnvelope]);
+  }, [backendConfig.wsUrl, backendConfig.apiToken]);
+
+  // Track vision-stream cadence: heartbeat = 2 * vis_fresh_s + 0.5 s. If we
+  // don't see ANY frame for that long the socket is silently broken; force
+  // a close so the reconnect path fires.
+  useEffect(() => {
+    if (wsClientRef.current === null) {
+      return;
+    }
+    const heartbeatMs = heartbeatMsFromVisFresh(visFreshFromLink);
+    if (heartbeatMs === null) {
+      return;
+    }
+    wsClientRef.current.setHeartbeatTimeoutMs(heartbeatMs);
+  }, [visFreshFromLink]);
 
   useEffect(() => {
     const timerId = window.setInterval(() => {
@@ -614,13 +711,35 @@ export default function App(): JSX.Element {
       });
     }
 
+    // Sticky for the rest of the session — drift between backend and webapp
+    // schemas is a deploy-config bug, not a transient runtime state.
+    if (state.schemaMismatchDetail !== null) {
+      alerts.push({
+        id: "schema-mismatch",
+        detail: `Schema mismatch — ${state.schemaMismatchDetail}. Backend update needed.`,
+        severity: "warn",
+      });
+    }
+
+    // 3+ consecutive transport failures = the backend is unreachable
+    // beyond a transient blip. Surface immediately; clears on next onopen.
+    if (state.wsConsecutiveErrors >= 3) {
+      alerts.push({
+        id: "ws-transport-errors",
+        detail: `WS transport unstable (${state.wsConsecutiveErrors} consecutive errors).`,
+        severity: "error",
+      });
+    }
+
     return alerts.slice(0, 5);
   }, [
     nowMs,
     projectedTelAgeS,
     projectedVisAgeS,
     state.linkStatus?.fc_connected,
+    state.schemaMismatchDetail,
     state.wsConnected,
+    state.wsConsecutiveErrors,
     trackingBlockedReason,
     telFreshThresholdS,
     visFreshThresholdS,
@@ -671,11 +790,13 @@ export default function App(): JSX.Element {
         </div>
       </header>
 
-      <Warnings
-        derivedAlerts={stableDerivedAlerts}
-        warnings={state.warnings}
-        onClear={onClearWarnings}
-      />
+      <ErrorBoundary sectionLabel="Warnings">
+        <Warnings
+          derivedAlerts={stableDerivedAlerts}
+          warnings={state.warnings}
+          onClear={onClearWarnings}
+        />
+      </ErrorBoundary>
 
       <main className="main-grid">
         <ControlPanel
@@ -691,36 +812,44 @@ export default function App(): JSX.Element {
         />
 
         <div className="right-column">
-          <VideoPanel
-            latestTel={state.latestTel}
-            latestVis={state.latestVis}
-            overlaySource={overlaySource}
-            videoUrl={backendConfig.videoUrl}
-          />
+          <ErrorBoundary sectionLabel="Video">
+            <VideoPanel
+              latestTel={state.latestTel}
+              latestVis={state.latestVis}
+              overlaySource={overlaySource}
+              videoUrl={backendConfig.videoUrl}
+            />
+          </ErrorBoundary>
 
-          <TrackingSummary
-            overlaySource={overlaySource}
-            trackingState={selectedTracking.trackingState}
-            trackingBlockedReason={trackingBlockedReason}
-            confidence={selectedTracking.confidence}
-            boundW={selectedTracking.boundW}
-            boundH={selectedTracking.boundH}
-            targetX={selectedTracking.targetX}
-            targetY={selectedTracking.targetY}
-            ageS={trackingAgeS}
-            freshThresholdS={trackingFreshThresholdS}
-            confidenceHistory={state.confidenceHistory}
-            ageHistory={state.ageHistory}
-          />
+          <ErrorBoundary sectionLabel="Tracking Summary">
+            <TrackingSummary
+              overlaySource={overlaySource}
+              trackingState={selectedTracking.trackingState}
+              trackingBlockedReason={trackingBlockedReason}
+              confidence={selectedTracking.confidence}
+              boundW={selectedTracking.boundW}
+              boundH={selectedTracking.boundH}
+              targetX={selectedTracking.targetX}
+              targetY={selectedTracking.targetY}
+              ageS={trackingAgeS}
+              freshThresholdS={trackingFreshThresholdS}
+              confidenceHistory={state.confidenceHistory}
+              ageHistory={state.ageHistory}
+            />
+          </ErrorBoundary>
 
-          <TelemetryPanel
-            linkStatus={state.linkStatus}
-            latestTel={state.latestTel}
-            latestVis={state.latestVis}
-            nowMs={nowMs}
-            linkUpdatedAtMs={state.linkUpdatedAtMs}
-            linkEnvelopeTimestampS={state.linkEnvelopeTimestampS}
-          />
+          <ErrorBoundary sectionLabel="Telemetry">
+            <TelemetryPanel
+              linkStatus={state.linkStatus}
+              latestTel={state.latestTel}
+              latestVis={state.latestVis}
+              nowMs={nowMs}
+              linkUpdatedAtMs={state.linkUpdatedAtMs}
+              linkEnvelopeTimestampS={state.linkEnvelopeTimestampS}
+              projectedVisAgeS={projectedVisAgeS}
+              visFreshThresholdS={visFreshThresholdS}
+            />
+          </ErrorBoundary>
         </div>
       </main>
     </div>
