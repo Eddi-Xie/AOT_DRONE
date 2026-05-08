@@ -20,6 +20,11 @@ using fc::clamp_target_coord;
 using fc::clamp_unit;
 using fc::rc::kMaxYawRateDps;
 
+// aux1 is the BetaFlight ARM channel; >midpoint means armed, ≤midpoint means
+// disarmed. Treating mid as disarmed is intentional (matches BetaFlight
+// CLI defaults) so the ambiguous edge resolves to the safer state.
+// Only setArm() should write aux1; ad-hoc writes elsewhere will silently
+// flip armed-ness behind setControlMode()'s back. Audit C-13.
 bool is_armed(const fc::BetaFlightCommand& cmd) {
     const std::uint16_t threshold =
         static_cast<std::uint16_t>((static_cast<unsigned>(fc::rc::DRONE_AUX_MIN) +
@@ -173,7 +178,9 @@ void FlightController::runHoverSearchState() {
 
     currentCommand_.roll = rc::DRONE_MID;
     currentCommand_.pitch = rc::DRONE_MID;
-    currentCommand_.yaw = rc::DRONE_MID;
+    // No `currentCommand_.yaw = rc::DRONE_MID;` here: commandYawRate() below
+    // overwrites yaw unconditionally, so a pre-write is a dead store. Roll
+    // and pitch above are NOT dead — nothing else writes them in this path.
 
     commandAltHoldDelta(0.0);
     commandYawRate(searchYawRate_dps_);
