@@ -52,6 +52,11 @@ interface ReconnectingWsClientOptions {
    * history, and referrer chains.
    */
   subprotocols?: string[];
+  /**
+   * Random source for the ±30% reconnect-jitter. Default `Math.random`.
+   * Tests inject a deterministic generator.
+   */
+  rng?: () => number;
 }
 
 export class ReconnectingWsClient {
@@ -61,6 +66,7 @@ export class ReconnectingWsClient {
   private readonly minBackoffMs: number;
   private readonly maxBackoffMs: number;
   private readonly subprotocols: string[] | undefined;
+  private readonly rng: () => number;
 
   private ws: WebSocket | null = null;
   private reconnectTimerId: number | null = null;
@@ -73,10 +79,11 @@ export class ReconnectingWsClient {
     this.onEnvelope = options.onEnvelope;
     this.onConnectionChange = options.onConnectionChange;
     this.minBackoffMs = options.minBackoffMs ?? 500;
-    this.maxBackoffMs = options.maxBackoffMs ?? 5000;
+    this.maxBackoffMs = options.maxBackoffMs ?? 15000;
     this.subprotocols = options.subprotocols && options.subprotocols.length > 0
       ? [...options.subprotocols]
       : undefined;
+    this.rng = options.rng ?? Math.random;
     this.reconnectDelayMs = this.minBackoffMs;
   }
 
@@ -177,10 +184,17 @@ export class ReconnectingWsClient {
       return;
     }
 
-    this.reconnectTimerId = window.setTimeout(() => {
+    // ±30% jitter spreads reconnects across a fleet so a flapping backend
+    // doesn't see a thundering-herd retry on every restart.
+    const jitterFactor = 0.7 + 0.6 * this.rng();
+    const jitteredMs = Math.max(0, Math.round(this.reconnectDelayMs * jitterFactor));
+
+    // setTimeout is available in browsers and the test runtime alike;
+    // bypassing `window.` keeps this testable without jsdom.
+    this.reconnectTimerId = setTimeout(() => {
       this.reconnectTimerId = null;
       this.connect();
-    }, this.reconnectDelayMs);
+    }, jitteredMs) as unknown as number;
 
     this.reconnectDelayMs = Math.min(this.reconnectDelayMs * 2, this.maxBackoffMs);
   }
@@ -190,7 +204,7 @@ export class ReconnectingWsClient {
       return;
     }
 
-    window.clearTimeout(this.reconnectTimerId);
+    clearTimeout(this.reconnectTimerId);
     this.reconnectTimerId = null;
   }
 
