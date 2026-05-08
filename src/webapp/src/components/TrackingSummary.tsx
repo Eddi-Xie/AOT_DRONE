@@ -147,7 +147,7 @@ function TrackingSummary({
           <Sparkline
             values={ageHistory}
             min={0}
-            max={1}
+            max={Math.max(0.05, ageThreshold * 4)}
             label="Age history sparkline"
             color="#d88a2f"
           />
