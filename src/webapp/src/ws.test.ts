@@ -608,13 +608,14 @@ describe("ReconnectingWsClient — lifecycle interactions", () => {
     client.stop();
   });
 
-  it("onerror leaves the heartbeat armed as a fallback for dropped onclose", () => {
-    // Round-5 contract change: previous round 1 cleared the watchdog inside
-    // onerror to avoid a redundant close() on a failing socket. But that
-    // also removed the only mechanism that would force-recover from a
-    // browser/proxy that delivers onerror but never the matching onclose.
-    // close() on a closing/closed socket is a documented no-op, so leaving
-    // the timer armed is harmless and provides defense.
+  it("onerror leaves the heartbeat timer armed (recovery body fires later if onclose drops)", () => {
+    // Round 1 cleared the watchdog inside onerror to avoid a redundant
+    // close() on a failing socket. Round 5 reverted that, since the
+    // watchdog body is what runs the dropped-onclose recovery
+    // (see armHeartbeat — when errorAlreadyCounted is still true on
+    // the watchdog tick, it forces the reconnect state machine).
+    // This test only pins down the "armed" half of the contract; the
+    // recovery itself is covered by the next test.
     const client = new ReconnectingWsClient({
       url: "ws://test",
       onEnvelope: () => {},
@@ -630,6 +631,43 @@ describe("ReconnectingWsClient — lifecycle interactions", () => {
     inst.onerror?.(new Event("error"));
     // Heartbeat timer survives onerror.
     expect(vi.getTimerCount()).toBe(1);
+
+    client.stop();
+  });
+
+  it("onerror + dropped onclose: heartbeat forces reconnect after heartbeatTimeoutMs", () => {
+    // The setConnected(false) inside onerror handles the UI-staleness
+    // half. The other half — the client never reconnecting — was the
+    // residual round-5 review found. The heartbeat watchdog now
+    // recognizes "onerror fired but onclose never arrived" and forces
+    // the recovery state machine.
+    const client = new ReconnectingWsClient({
+      url: "ws://test",
+      onEnvelope: () => {},
+      onConnectionChange: () => {},
+      heartbeatTimeoutMs: 500,
+      minBackoffMs: 1000,
+      rng: () => 0.5,
+    });
+    client.start();
+    const inst = lastInstance();
+    inst.onopen?.(new Event("open"));
+    const beforeReconnect = fakeInstances.length;
+
+    // onerror fires; we deliberately do NOT fire the matching onclose
+    // to simulate a proxy dropping it.
+    inst.onerror?.(new Event("error"));
+    expect(inst.close).toHaveBeenCalledTimes(1);
+
+    // Watchdog fires at heartbeatTimeoutMs; recovery path arms reconnect.
+    vi.advanceTimersByTime(501);
+
+    // Reconnect timer should now be pending (1000 ms base * jitter 1.0).
+    expect(vi.getTimerCount()).toBe(1);
+    vi.runOnlyPendingTimers();
+
+    // A new socket should now exist beyond the original one.
+    expect(fakeInstances.length).toBe(beforeReconnect + 1);
 
     client.stop();
   });

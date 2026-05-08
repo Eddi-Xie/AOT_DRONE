@@ -247,10 +247,11 @@ export class ReconnectingWsClient {
       // call the UI would stay "connected" against a dead socket. The
       // setConnected guard makes a duplicate call from onclose a no-op.
       this.setConnected(false);
-      // We deliberately leave the heartbeat timer armed — close() on a
-      // closing/closed socket is a documented no-op, so a watchdog that
-      // fires after onerror cannot harm the lifecycle and provides an
-      // additional reconnect trigger if onclose never lands.
+      // Leave the heartbeat timer armed — its body now contains the
+      // dropped-onclose recovery path (see armHeartbeat). If onclose
+      // arrives normally, clearHeartbeatTimer in onclose disables the
+      // recovery branch. If onclose drops, the watchdog forces the
+      // reconnect state machine after heartbeatTimeoutMs.
       if (this.ws !== null) {
         this.ws.close();
       }
@@ -363,9 +364,21 @@ export class ReconnectingWsClient {
     }
     this.heartbeatTimerId = setTimeout(() => {
       this.heartbeatTimerId = null;
-      // Force-close the silent socket; onclose will schedule reconnect.
-      if (this.ws !== null) {
-        this.ws.close();
+      if (this.ws === null) {
+        return;
+      }
+      this.ws.close();
+      // Recovery path for dropped onclose: if onerror already fired but
+      // the matching onclose was dropped by a flaky proxy / HTTP/2 mux,
+      // the close() above is a no-op (socket is already CLOSING) and
+      // onclose will never run, so the existing reconnect path inside
+      // onclose can never fire. Detect that case by errorAlreadyCounted
+      // still being set, and force the recovery state machine here.
+      if (this.errorAlreadyCounted) {
+        this.ws = null;
+        this.setConnected(false);
+        this.errorAlreadyCounted = false;
+        this.scheduleReconnect();
       }
     }, this.heartbeatTimeoutMs);
   }
