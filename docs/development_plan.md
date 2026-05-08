@@ -1027,4 +1027,71 @@ If Eddi can move past these without John, they go in Sprint 0:
   state-flicker grace, black-frame detection). Branch
   `chore/sprint0-vision-software` once this PR merges.
 
+### 2026-05-07 — Eddi + Claude — S0.5 vision software fixes (`chore/sprint0-vision-software`)
+
+- Branch `chore/sprint0-vision-software` off `dev` (post-merge of
+  `chore/sprint0-fc-software` PR #24). Seven logical commits:
+  1. `fix(vision): YOLO model warmup in YoloDetector.__init__` —
+     dummy 640x480 black-frame inference at construction time so the
+     200-500 ms Ultralytics JIT compile happens during boot rather than
+     on the first real frame. Failures non-fatal (logged).
+  2. `fix(vision): camera reconnect with exponential backoff + post-open
+     grace` — `CameraSource.read()` now performs ONE release+reopen
+     attempt per call with a 0.25 s -> 5 s exponential backoff, and
+     tolerates the first 5 black/empty frames after each open as the
+     "driver settling" window. File sources short-circuit reconnect
+     since EOF is terminal. New `is_live` property on CameraSource
+     drives main.py's retry-vs-terminate decision. 4 unit tests using a
+     fake `cv2.VideoCapture` via `monkeypatch.setitem(sys.modules, "cv2",
+     ...)`.
+  3. `fix(vision): black-frame detection + non-fatal read failures in
+     main loop` — `vision/main.py` now warns once per low-var stretch
+     (`frame.var() < 1.0` for 30 consecutive frames) and uses
+     `getattr(source, "is_live", False)` to decide whether a False
+     return triggers retry (live) or termination (file/test fakes).
+     2 capsys-based tests pin the "warn once + reset on recovery"
+     contract.
+  4. `fix(vision): one-frame grace before TARGET_DETECTED → NO_TARGET
+     fallback` — VisionPipeline tracks a miss-streak counter; a single
+     missed detection in TARGET_DETECTED no longer resets the
+     detect-hold accumulator. New `target_detected_grace_frames`
+     config (default 1). 3 transition tests cover absorb/exhaust/reset.
+  5. `fix(vision): tracker re-init only on fail or IoU<0.5; skip update
+     on detection frames` — KCF tracker no longer re-inits on every
+     detection (audit A3) and `tracker.update()` is skipped when a
+     detection arrives the same frame (audit A12). New `_iou` helper,
+     `tracker_reinit_iou` config (default 0.5), and
+     `_last_tracker_bbox` cache. 3 tests including a `_CountingTracker`
+     fake that tallies init/update calls.
+  6. `fix(vision): real confidence in TRACKING + tracker-only decay
+     toward floor` — TRACKING-state confidence now reflects detector
+     output on detection frames and decays multiplicatively (default
+     0.95/frame) on tracker-only frames toward a configurable floor
+     (default 0.3). Env-driven via `VISION_TRACKER_ONLY_CONF_DECAY` and
+     `VISION_TRACKER_ONLY_CONF_FLOOR`. 3 tests pin seed/decay/floor.
+- Verification:
+  - `python -m pre_commit run --all-files` clean.
+  - `python -m pytest tests/ -q` => `139 passed, 1 skipped, 1 xfailed`
+    (was 124 + 4 camera + 2 black-frame + 3 grace + 3 tracker re-init +
+    3 confidence = 139 new total).
+  - `cmake --build build -j` clean; `ctest` => 5/5 unchanged from S0.4.
+  - Smoke (manual): default vision launch boots without 500 ms first-
+    frame stall; LC_NUMERIC=de_DE smoke not relevant here.
+- New env vars (`VISION_TRACKER_ONLY_CONF_DECAY`,
+  `VISION_TRACKER_ONLY_CONF_FLOOR`) deserve a deployment-guide entry
+  alongside the S0.3 `BACKEND_*` and S0.4 `FC_*` knobs. Captured for
+  the next docs sweep; no code action this PR.
+- Out of scope (deferred):
+  - **track_id=1 hardcoding** in yolo_detector.py:103 — addressed in
+    S0.16 (identity-aware target selection) since it requires the
+    Ultralytics `model.track()` switch and BoT-SORT/ByteTrack
+    integration.
+  - The audit's broader "vision pipeline threading" refactor (A6) is
+    S0.15.
+- Next session: S0.6 (webapp software fixes — top-level error
+  boundary, real WS schema validation, reconnect jitter, heartbeat
+  watchdog, sparkline range, age sparkline, `asTelUpdate`/`asVisUpdate`
+  range guards). Branch `chore/sprint0-webapp-software` once this PR
+  merges.
+
 ### (future entries here)
