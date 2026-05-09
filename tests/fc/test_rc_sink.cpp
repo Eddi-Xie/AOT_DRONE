@@ -259,6 +259,38 @@ void test_fake_sink_seq_advances_per_frame() {
     ::close(listener);
 }
 
+// The IRcSink virtuals tx_ratio() / arm_switch() / tuning_mismatch()
+// landed in S0.8 alongside MspRcSink. The pre-existing sinks (NullSink,
+// RecordingSink, FakeBetaflightSink) intentionally don't override them
+// — they have no MSP transport — and inherit the safe defaults
+// (tx_ratio=1.0 so TEL still reads as healthy, arm_switch=false, no
+// rate-profile mismatch). Pin those defaults so a future override can't
+// silently misreport sink health to the operator.
+void test_irc_sink_defaults_for_existing_sinks() {
+    fc::NullSink null_sink;
+    TEST_ASSERT(null_sink.tx_ratio() == 1.0);
+    TEST_ASSERT(!null_sink.arm_switch());
+    TEST_ASSERT(!null_sink.tuning_mismatch());
+
+    const std::string log_dir = make_temp_subdir("rec_defaults");
+    std::system(("rm -rf " + log_dir).c_str());
+    fc::RecordingSink rec(log_dir);
+    TEST_ASSERT(rec.ok());
+    TEST_ASSERT(rec.tx_ratio() == 1.0);
+    TEST_ASSERT(!rec.arm_switch());
+    TEST_ASSERT(!rec.tuning_mismatch());
+    std::system(("rm -rf " + log_dir).c_str());
+
+    int port = 0;
+    const int listener = bind_loopback_listener(&port);
+    fc::FakeBetaflightSink fake("127.0.0.1", port);
+    TEST_ASSERT(fake.ok());
+    TEST_ASSERT(fake.tx_ratio() == 1.0);
+    TEST_ASSERT(!fake.arm_switch());
+    TEST_ASSERT(!fake.tuning_mismatch());
+    ::close(listener);
+}
+
 void test_fake_sink_rejects_invalid_host_and_port() {
     fc::FakeBetaflightSink bad_host("not-a-valid-ip", 9101);
     TEST_ASSERT(!bad_host.ok());
@@ -283,6 +315,7 @@ int main() {
     test_recording_sink_rows_lost_accessor_starts_zero();
     test_fake_sink_sends_self_contained_json_datagram();
     test_fake_sink_seq_advances_per_frame();
+    test_irc_sink_defaults_for_existing_sinks();
     test_fake_sink_rejects_invalid_host_and_port();
     return 0;
 }

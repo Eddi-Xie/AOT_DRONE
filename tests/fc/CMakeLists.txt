@@ -28,3 +28,11 @@ add_test(NAME test_locale_safe_json COMMAND test_locale_safe_json)
 add_executable(test_rc_sink test_rc_sink.cpp)
 target_link_libraries(test_rc_sink PRIVATE fc)
 add_test(NAME test_rc_sink COMMAND test_rc_sink)
+
+add_executable(test_msp_framing test_msp_framing.cpp)
+target_link_libraries(test_msp_framing PRIVATE fc)
+add_test(NAME test_msp_framing COMMAND test_msp_framing)
+
+add_executable(test_msp_rc_sink test_msp_rc_sink.cpp)
+target_link_libraries(test_msp_rc_sink PRIVATE fc)
+add_test(NAME test_msp_rc_sink COMMAND test_msp_rc_sink)

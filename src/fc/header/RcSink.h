@@ -51,6 +51,28 @@ class IRcSink {
     // Diagnostic name ("null", "recording", "fake", "msp"). Logged at
     // startup so operators can confirm which sink is active.
     virtual std::string name() const = 0;
+
+    // EWMA over recent write attempts. Returned as a float in [0.0, 1.0]
+    // and surfaced in TEL JSON as `msp_tx_ratio` (S0.8 commit 4) so the
+    // operator can see the USB link's success rate degrade in real time
+    // before it crosses ok()'s hard threshold. Sinks without a flaky
+    // transport (NullSink, RecordingSink, FakeBetaflightSink) inherit the
+    // 1.0 default — only MspRcSink overrides.
+    virtual double tx_ratio() const { return 1.0; }
+
+    // Most-recent observed RC arm-switch state, latched from MSP_RC
+    // replies by MspRcSink. The data path is in S0.8; the consumer is the
+    // S0.14 arm-authority gate's "RC switch held ≥1 s" condition. Non-
+    // MSP sinks have no view of the FC-side arm switch and inherit false.
+    virtual bool arm_switch() const { return false; }
+
+    // True iff the FC's rate profile didn't reply to MSP_RC_TUNING within
+    // the boot-probe window. main.cpp's apply_control_mode_safely refuses
+    // Tracking/Takeoff transitions in this state per the dev-plan
+    // requirement to "log mismatch as WARNING; continue but require
+    // operator confirm before mode change". Non-MSP sinks have no rate
+    // profile to mismatch and inherit false.
+    virtual bool tuning_mismatch() const { return false; }
 };
 
 // Default sink. Counts writes for diagnostics; logs only the first one

@@ -2,12 +2,14 @@
 #include "CmdSeq.h"
 #include "CommandServer.h"
 #include "FlightController.h"
+#include "MspRcSink.h"
 #include "ProtocolConstants.h"
 #include "RcMath.h"
 #include "RcSink.h"
 #include "TelemetryPublisher.h"
 
 #include <arpa/inet.h>
+#include <sys/stat.h>
 
 #include <algorithm>
 #include <atomic>
@@ -128,8 +130,45 @@ void apply_tracking_update(const fc::CommandFrame& cmd, fc::FlightController& co
     controller.updateTracking(tracking_message);
 }
 
+// Apply a control-mode transition through a single chokepoint. Tracking
+// and Takeoff both depend on the FC channel-write path being healthy
+// (boot probe ok, recent writes succeeding, rate profile confirmed) —
+// refusing those transitions when the RC sink can't honour them keeps
+// the drone in its current mode (typically LandSafely or Manual) rather
+// than committing to a mode that needs MSP-level guarantees we don't
+// have. LandSafely and Manual are always allowed: the operator must be
+// able to land regardless of sink state.
+//
+// The dev plan (S0.8 line 272-273) calls for refusing Tracking/Takeoff
+// on boot-probe failure AND on MSP_RC_TUNING mismatch. Both conditions
+// gate identically here; operator-confirm UI for the mismatch path is
+// out of scope for S0.8 and lands with S0.14's arm-authority work.
+bool apply_control_mode_safely(fc::ControlMode desired, fc::FlightController& flight_controller,
+                               const fc::IRcSink& rc_sink, std::int32_t cmd_seq) {
+    const bool needs_msp =
+        (desired == fc::ControlMode::Tracking || desired == fc::ControlMode::Takeoff);
+    if (needs_msp) {
+        if (!rc_sink.ok()) {
+            std::cerr << "[FC] CMD seq=" << cmd_seq << " refused mode transition to "
+                      << static_cast<int>(desired)
+                      << "; RC sink not healthy (boot probe failed or write loop degraded)\n";
+            return false;
+        }
+        if (rc_sink.tuning_mismatch()) {
+            std::cerr << "[FC] CMD seq=" << cmd_seq << " refused mode transition to "
+                      << static_cast<int>(desired)
+                      << "; MSP_RC_TUNING did not confirm the FC's rate profile (operator-"
+                         "confirm UI lands with S0.14)\n";
+            return false;
+        }
+    }
+    flight_controller.setControlMode(desired);
+    return true;
+}
+
 std::string build_tel_json(uint64_t seq, const fc::TelemetryData& telemetry,
-                           const fc::TrackingMessage& tracking_message, double cmd_age_s) {
+                           const fc::TrackingMessage& tracking_message, double cmd_age_s,
+                           double msp_tx_ratio) {
     double target_x = 0.0;
     double target_y = 0.0;
     double bound_w = 0.0;
@@ -156,6 +195,7 @@ std::string build_tel_json(uint64_t seq, const fc::TelemetryData& telemetry,
         << "\"timestamp_s\":" << telemetry.timestamp_s << ","
         << "\"control_mode\":" << static_cast<int>(telemetry.control_mode) << ","
         << "\"cmd_age_s\":" << cmd_age_s << ","
+        << "\"msp_tx_ratio\":" << msp_tx_ratio << ","
         << "\"tracking_state\":" << static_cast<int>(telemetry.tracking_state) << ","
         << "\"distFront_m\":" << telemetry.distFront_m << ","
         << "\"distBack_m\":" << telemetry.distBack_m << ","
@@ -213,9 +253,51 @@ std::unique_ptr<fc::IRcSink> make_rc_sink_from_env() {
         return sink;
     }
     if (sink_kind == "msp") {
-        std::cerr << "[FC] FC_RC_SINK=msp is reserved for S0.8 (USB MSP driver) and is not yet "
-                     "implemented. Use 'null', 'recording', or 'fake' for now.\n";
-        return nullptr;
+        const char* dev_env = std::getenv("FC_RC_DEVICE");
+        if (dev_env == nullptr || *dev_env == '\0') {
+            std::cerr << "[FC] FC_RC_SINK=msp requires FC_RC_DEVICE to point at the FC's USB "
+                         "serial node (e.g. /dev/cu.usbmodem... on macOS, /dev/ttyACM... on "
+                         "Linux). Refusing to start.\n";
+            return nullptr;
+        }
+        // Validate the device exists AND is a character device. This catches
+        // operator typos like FC_RC_DEVICE=/etc/hosts or a stale path from a
+        // previous USB session up-front, with the offending path named in
+        // the message — rather than later when open() / tcgetattr would
+        // produce a confusing "Inappropriate ioctl for device".
+        struct stat st{};
+        if (::stat(dev_env, &st) != 0 || !S_ISCHR(st.st_mode)) {
+            std::cerr << "[FC] FC_RC_DEVICE='" << dev_env
+                      << "' is not an accessible character device (open the FC over USB and "
+                         "confirm the path with `ls /dev/cu.usbmodem* /dev/ttyACM*`). "
+                         "Refusing to start.\n";
+            return nullptr;
+        }
+        const char* baud_env = std::getenv("FC_RC_BAUD");
+        int baud = 115200;
+        if (baud_env != nullptr && *baud_env != '\0') {
+            // Strict parse mirroring the FC_TEL_PORT / FC_RC_FAKE_PORT
+            // pattern: from_chars rejects trailing junk (e.g. "115200abc")
+            // and partial parses, unlike std::stoi which silently accepts
+            // the leading digits.
+            const char* const begin = baud_env;
+            const char* const end = begin + std::strlen(begin);
+            auto [ptr, ec] = std::from_chars(begin, end, baud);
+            if (ec != std::errc{} || ptr != end || baud <= 0) {
+                std::cerr << "[FC] Invalid FC_RC_BAUD='" << baud_env
+                          << "', refusing to start (must be a positive base-10 integer; "
+                             "MspRcSink supports 9600, 19200, 38400, 57600, 115200, 230400, "
+                             "460800, 921600)\n";
+                return nullptr;
+            }
+        }
+        auto sink = fc::MspRcSink::from_device(dev_env, baud);
+        if (sink == nullptr || !sink->ok()) {
+            std::cerr << "[FC] MspRcSink failed to initialize (open / termios / boot probe). "
+                         "Refusing to start.\n";
+            return nullptr;
+        }
+        return sink;
     }
     std::cerr << "[FC] Unknown FC_RC_SINK='" << sink_kind
               << "'. Valid: null|recording|fake|msp. Falling back to 'null' is unsafe; refusing "
@@ -235,6 +317,14 @@ int main() {
 
     std::signal(SIGINT, handle_signal);
     std::signal(SIGTERM, handle_signal);
+    // Ignore SIGPIPE process-wide. MspRcSink::write_frame_ writes to a
+    // USB serial fd; a USB unplug or FC reboot can deliver SIGPIPE which
+    // would otherwise terminate fc_app outright, bypassing the carefully
+    // designed sink-degraded -> LandSafely failsafe path. With SIGPIPE
+    // ignored, write() returns EPIPE and the sink's hard-error branch
+    // closes the fd + flips ok() so main loop's parallel latch enters
+    // LandSafely on the next tick.
+    std::signal(SIGPIPE, SIG_IGN);
 
     // Default to loopback so a misconfigured deployment doesn't accidentally
     // expose the FC TCP listener to the LAN. Operators that intentionally need
@@ -337,6 +427,16 @@ int main() {
     // an in-flight-behaviour change deferred to S0.7 (HIL bench gate).
     bool failsafe_engaged = false;
 
+    // Parallel latch for RC-sink degradation (boot-probe failure or
+    // persistent write failure flipped MspRcSink::ok() to false). Kept
+    // SEPARATE from failsafe_engaged so the recovery branches don't
+    // cross-clear: a CMD-link recovery must not spuriously re-enable
+    // mode transitions while MSP is still wedged, and an MSP recovery
+    // must not silently leave LandSafely while CMD is also stale. Each
+    // condition has its own entry/exit log so the operator can see
+    // which one tripped and which one cleared.
+    bool sink_degraded_engaged = false;
+
     const auto period = std::chrono::milliseconds(1000 / kTelHz);
     auto next_tick = std::chrono::steady_clock::now();
     auto last_tick = next_tick;
@@ -380,7 +480,8 @@ int main() {
             // which is a more specific failure mode than "drone lands".
             fc::ControlMode desired_mode;
             if (to_control_mode(cmd.desired_mode, desired_mode)) {
-                flight_controller.setControlMode(desired_mode);
+                apply_control_mode_safely(desired_mode, flight_controller, *rc_sink,
+                                          static_cast<std::int32_t>(cmd.seq));
             } else {
                 std::cerr << "[FC] CMD seq=" << cmd.seq
                           << " has unknown desired_mode=" << cmd.desired_mode
@@ -414,8 +515,28 @@ int main() {
             // the entry-side branch). Auto-resume of a saved pre-failsafe
             // mode is the deferred two-stage state machine in S0.7.
             std::cerr << "[FC] CMD link recovered (age=" << cmd_age_s
-                      << "s); cleared failsafe latch; mode unchanged unless a CMD already applied "
-                         "this tick\n";
+                      << "s); cleared failsafe latch (sink_degraded still engaged: "
+                      << (sink_degraded_engaged ? "yes" : "no")
+                      << "); mode unchanged unless a CMD already applied this tick\n";
+        }
+
+        // Parallel sink-degraded latch (S0.8). MspRcSink flips ok()=false
+        // when its USB write loop persists in failure or its boot probe
+        // didn't reply; that's distinct from CMD-link staleness above and
+        // tracked separately so the two recovery paths don't interfere.
+        // Both paths converge on LandSafely as the safe target.
+        const bool sink_degraded_now = !rc_sink->ok();
+        if (sink_degraded_now && !sink_degraded_engaged) {
+            sink_degraded_engaged = true;
+            flight_controller.setControlMode(fc::ControlMode::LandSafely);
+            std::cerr << "[FC] RC sink degraded (ok=false, tx_ratio=" << rc_sink->tx_ratio()
+                      << "); entering LandSafely failsafe\n";
+        } else if (!sink_degraded_now && sink_degraded_engaged) {
+            sink_degraded_engaged = false;
+            std::cerr << "[FC] RC sink recovered; cleared sink-degraded latch (CMD-stale "
+                         "failsafe still engaged: "
+                      << (failsafe_engaged ? "yes" : "no")
+                      << "); mode unchanged unless a CMD already applied this tick\n";
         }
 
         const fc::BetaFlightCommand rc_cmd = flight_controller.updateTimeStep(dt);
@@ -425,7 +546,7 @@ int main() {
         const fc::TrackingMessage& tracking_message = flight_controller.getLastTrackingMessage();
 
         const std::string tel_json =
-            build_tel_json(tel_seq, telemetry, tracking_message, cmd_age_s);
+            build_tel_json(tel_seq, telemetry, tracking_message, cmd_age_s, rc_sink->tx_ratio());
         telemetry_publisher.send_json(tel_json);
 
         if ((tel_seq % 25U) == 0U) {
