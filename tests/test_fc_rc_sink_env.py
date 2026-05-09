@@ -175,9 +175,9 @@ def test_recording_sink_refuses_when_log_dir_is_a_regular_file(tmp_path: Path) -
 
 def test_default_null_sink_runs_until_signaled(tmp_path: Path) -> None:
     # Sanity: with no env overrides, fc_app starts cleanly. We give it
-    # 0.6 s, signal it, and verify it logged the NullSink banner. This
-    # catches a regression where main.cpp accidentally errors on the
-    # default code path.
+    # 0.6 s, signal it, and verify it logged a NullSink-specific banner.
+    # This catches a regression where main.cpp accidentally errors on
+    # the default code path.
     rc, out, err = _run_fc({}, timeout=0.6)
     # Killed by SIGTERM -> negative rc (POSIX) or 143 (some shells).
     assert rc in (
@@ -186,7 +186,19 @@ def test_default_null_sink_runs_until_signaled(tmp_path: Path) -> None:
         0,
     ), f"unexpected rc={rc}; stdout={out!r} stderr={err!r}"
     combined = out + err
-    assert "RC sink=null" in combined
+    # fc_app emits TWO null-sink-specific banners on stdout:
+    #   1. main's "RC sink=null" startup line
+    #   2. NullSink's "[FC] NullSink received first channel write..." log
+    # Both can interleave with the CommandServer worker's "Waiting for TCP
+    # command client" log when stdout block-buffering meets multi-threaded
+    # writes — the bytes arrive but the contiguous substring of either
+    # one banner can be split. Accept either: an unmangled "RC sink=null"
+    # OR the NullSink first-write log. Both are unique to the default
+    # code path; only one needs to survive interleaving for the test to
+    # confirm "null was selected".
+    assert "RC sink=null" in combined or "NullSink received" in combined, (
+        "expected null-sink confirmation in combined output; " f"stdout={out!r} stderr={err!r}"
+    )
 
 
 def test_recording_sink_writes_csv_under_temp_dir(tmp_path: Path) -> None:
