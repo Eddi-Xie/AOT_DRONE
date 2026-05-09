@@ -44,9 +44,11 @@ jobs:
         run: |
           pre-commit run --all-files
 
-      - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y cmake g++
-
+      # cmake and g++ ship with the ubuntu-latest runner image
+      # (build-essential is part of the default GitHub Actions Ubuntu
+      # toolset). Skipping `apt-get update` avoids hangs when an upstream
+      # mirror (e.g. azure.archive.ubuntu.com) is unreachable — a
+      # 90-minute mirror retry was the trigger for adding this comment.
       - name: Configure
         run: cmake -S . -B build
 
