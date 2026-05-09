@@ -2,12 +2,14 @@
 #include "CmdSeq.h"
 #include "CommandServer.h"
 #include "FlightController.h"
+#include "MspRcSink.h"
 #include "ProtocolConstants.h"
 #include "RcMath.h"
 #include "RcSink.h"
 #include "TelemetryPublisher.h"
 
 #include <arpa/inet.h>
+#include <sys/stat.h>
 
 #include <algorithm>
 #include <atomic>
@@ -213,9 +215,51 @@ std::unique_ptr<fc::IRcSink> make_rc_sink_from_env() {
         return sink;
     }
     if (sink_kind == "msp") {
-        std::cerr << "[FC] FC_RC_SINK=msp is reserved for S0.8 (USB MSP driver) and is not yet "
-                     "implemented. Use 'null', 'recording', or 'fake' for now.\n";
-        return nullptr;
+        const char* dev_env = std::getenv("FC_RC_DEVICE");
+        if (dev_env == nullptr || *dev_env == '\0') {
+            std::cerr << "[FC] FC_RC_SINK=msp requires FC_RC_DEVICE to point at the FC's USB "
+                         "serial node (e.g. /dev/cu.usbmodem... on macOS, /dev/ttyACM... on "
+                         "Linux). Refusing to start.\n";
+            return nullptr;
+        }
+        // Validate the device exists AND is a character device. This catches
+        // operator typos like FC_RC_DEVICE=/etc/hosts or a stale path from a
+        // previous USB session up-front, with the offending path named in
+        // the message — rather than later when open() / tcgetattr would
+        // produce a confusing "Inappropriate ioctl for device".
+        struct stat st{};
+        if (::stat(dev_env, &st) != 0 || !S_ISCHR(st.st_mode)) {
+            std::cerr << "[FC] FC_RC_DEVICE='" << dev_env
+                      << "' is not an accessible character device (open the FC over USB and "
+                         "confirm the path with `ls /dev/cu.usbmodem* /dev/ttyACM*`). "
+                         "Refusing to start.\n";
+            return nullptr;
+        }
+        const char* baud_env = std::getenv("FC_RC_BAUD");
+        int baud = 115200;
+        if (baud_env != nullptr && *baud_env != '\0') {
+            // Strict parse mirroring the FC_TEL_PORT / FC_RC_FAKE_PORT
+            // pattern: from_chars rejects trailing junk (e.g. "115200abc")
+            // and partial parses, unlike std::stoi which silently accepts
+            // the leading digits.
+            const char* const begin = baud_env;
+            const char* const end = begin + std::strlen(begin);
+            auto [ptr, ec] = std::from_chars(begin, end, baud);
+            if (ec != std::errc{} || ptr != end || baud <= 0) {
+                std::cerr << "[FC] Invalid FC_RC_BAUD='" << baud_env
+                          << "', refusing to start (must be a positive base-10 integer; "
+                             "MspRcSink supports 9600, 19200, 38400, 57600, 115200, 230400, "
+                             "460800, 921600)\n";
+                return nullptr;
+            }
+        }
+        auto sink = fc::MspRcSink::from_device(dev_env, baud);
+        if (sink == nullptr || !sink->ok()) {
+            std::cerr << "[FC] MspRcSink failed to initialize (open / termios / boot probe). "
+                         "Refusing to start.\n";
+            return nullptr;
+        }
+        return sink;
     }
     std::cerr << "[FC] Unknown FC_RC_SINK='" << sink_kind
               << "'. Valid: null|recording|fake|msp. Falling back to 'null' is unsafe; refusing "

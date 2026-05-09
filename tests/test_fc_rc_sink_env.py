@@ -2,14 +2,17 @@
 
 `make_rc_sink_from_env` in src/fc/implementation/main.cpp is the single
 operator-facing config knob for the HIL bench. The error paths (unknown
-sink kind, invalid port, msp-not-implemented) are easy to break in S0.8
-when the msp branch lands; locking the contract via subprocess tests
-catches a regression at the binary boundary, which is the right level
-for env-driven dispatch.
+sink kind, invalid port, missing MSP device, bad baud) are easy to
+break; locking the contract via subprocess tests catches a regression
+at the binary boundary, which is the right level for env-driven
+dispatch.
 
 Each test launches fc_app with a specific env, expects exit 1, and
 asserts a substring of the stderr message identifying the failure
 shape.
+
+The MSP success path requires a real Betaflight FC on USB and is
+covered by the bench-acceptance procedure in docs/hil.md, not here.
 """
 
 from __future__ import annotations
@@ -69,10 +72,62 @@ def test_unknown_fc_rc_sink_refuses_to_start() -> None:
     assert "Unknown FC_RC_SINK='bogus_sink_value'" in err
 
 
-def test_msp_sink_refuses_with_s08_pointer() -> None:
+def test_msp_sink_refuses_without_fc_rc_device() -> None:
+    # Operator forgot to set FC_RC_DEVICE. Refuse up-front with a message
+    # that names the missing knob and provides example device paths for
+    # both supported platforms — debugging "what's wrong" should not
+    # require reading the source.
     rc, _out, err = _run_fc({"FC_RC_SINK": "msp"})
     assert rc == 1, f"expected exit 1, got {rc}; stderr={err!r}"
-    assert "S0.8" in err and "USB MSP" in err
+    assert "FC_RC_DEVICE" in err
+    assert "/dev/cu.usbmodem" in err or "/dev/ttyACM" in err
+
+
+def test_msp_sink_refuses_when_device_path_does_not_exist() -> None:
+    rc, _out, err = _run_fc({"FC_RC_SINK": "msp", "FC_RC_DEVICE": "/nonexistent/usb/device"})
+    assert rc == 1, f"expected exit 1, got {rc}; stderr={err!r}"
+    assert "FC_RC_DEVICE" in err
+    assert "not an accessible character device" in err
+
+
+def test_msp_sink_refuses_when_device_path_is_a_regular_file() -> None:
+    # /etc/hosts is a stable, regular file present on every macOS / Linux
+    # box. Stat() succeeds but S_ISCHR is false → refused before open() so
+    # the operator gets an actionable error instead of "tcgetattr failed".
+    rc, _out, err = _run_fc({"FC_RC_SINK": "msp", "FC_RC_DEVICE": "/etc/hosts"})
+    assert rc == 1, f"expected exit 1, got {rc}; stderr={err!r}"
+    assert "not an accessible character device" in err
+
+
+def test_msp_sink_refuses_when_baud_is_non_numeric() -> None:
+    # /dev/null is a character device on every POSIX system, so it passes
+    # the FC_RC_DEVICE chardev check. The bad baud is rejected before
+    # anything tries to open the device.
+    rc, _out, err = _run_fc(
+        {
+            "FC_RC_SINK": "msp",
+            "FC_RC_DEVICE": "/dev/null",
+            "FC_RC_BAUD": "not-a-baud",
+        }
+    )
+    assert rc == 1, f"expected exit 1, got {rc}; stderr={err!r}"
+    assert "FC_RC_BAUD" in err
+    assert "not-a-baud" in err
+
+
+def test_msp_sink_refuses_when_baud_has_trailing_junk() -> None:
+    # Trailing junk after a valid integer (e.g. "115200abc") would be
+    # silently truncated by std::stoi. We use std::from_chars and assert
+    # ptr == end, matching the FC_TEL_PORT / FC_RC_FAKE_PORT policy.
+    rc, _out, err = _run_fc(
+        {
+            "FC_RC_SINK": "msp",
+            "FC_RC_DEVICE": "/dev/null",
+            "FC_RC_BAUD": "115200abc",
+        }
+    )
+    assert rc == 1, f"expected exit 1, got {rc}; stderr={err!r}"
+    assert "FC_RC_BAUD" in err
 
 
 def test_invalid_fc_rc_fake_port_non_numeric() -> None:
