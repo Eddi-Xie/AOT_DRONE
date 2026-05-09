@@ -65,6 +65,14 @@ class IRcSink {
     // S0.14 arm-authority gate's "RC switch held ≥1 s" condition. Non-
     // MSP sinks have no view of the FC-side arm switch and inherit false.
     virtual bool arm_switch() const { return false; }
+
+    // True iff the FC's rate profile didn't reply to MSP_RC_TUNING within
+    // the boot-probe window. main.cpp's apply_control_mode_safely refuses
+    // Tracking/Takeoff transitions in this state per the dev-plan
+    // requirement to "log mismatch as WARNING; continue but require
+    // operator confirm before mode change". Non-MSP sinks have no rate
+    // profile to mismatch and inherit false.
+    virtual bool tuning_mismatch() const { return false; }
 };
 
 // Default sink. Counts writes for diagnostics; logs only the first one

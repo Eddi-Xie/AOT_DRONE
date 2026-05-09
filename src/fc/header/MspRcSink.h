@@ -72,9 +72,10 @@ class MspRcSink final : public IRcSink {
 
     // True iff MSP_RC_TUNING failed to reply within the boot-probe
     // window. The dev plan calls for "log mismatch as WARNING; continue
-    // but require operator confirm before mode change" — S0.8 commit 4
-    // gates Tracking/Takeoff transitions on this flag in main.cpp.
-    bool tuning_mismatch() const { return tuning_mismatch_; }
+    // but require operator confirm before mode change" — main.cpp's
+    // apply_control_mode_safely gates Tracking/Takeoff transitions on
+    // this flag, accessed through the IRcSink virtual.
+    bool tuning_mismatch() const override { return tuning_mismatch_; }
 
     // Diagnostic counters. tx_ratio() is the user-facing metric; these
     // raw counts let tests assert the EWMA arithmetic without depending
