@@ -4,6 +4,7 @@
 #include "FlightController.h"
 #include "ProtocolConstants.h"
 #include "RcMath.h"
+#include "RcSink.h"
 #include "TelemetryPublisher.h"
 
 #include <arpa/inet.h>
@@ -21,6 +22,7 @@
 #include <iomanip>
 #include <iostream>
 #include <locale>
+#include <memory>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -166,6 +168,61 @@ std::string build_tel_json(uint64_t seq, const fc::TelemetryData& telemetry,
     return oss.str();
 }
 
+// Construct the IRcSink selected by FC_RC_SINK. Defaults to NullSink so an
+// unset env mirrors the pre-S0.7 discard behaviour. Returns nullptr on a
+// fatal config error (caller is responsible for reporting + exiting).
+std::unique_ptr<fc::IRcSink> make_rc_sink_from_env() {
+    const char* sink_env = std::getenv("FC_RC_SINK");
+    const std::string sink_kind = (sink_env && *sink_env) ? std::string(sink_env) : "null";
+
+    if (sink_kind == "null") {
+        return std::make_unique<fc::NullSink>();
+    }
+    if (sink_kind == "recording") {
+        const char* dir_env = std::getenv("FC_RC_LOG_DIR");
+        const std::string log_dir =
+            (dir_env && *dir_env) ? std::string(dir_env) : std::string("logs/hil");
+        auto sink = std::make_unique<fc::RecordingSink>(log_dir);
+        if (!sink->ok()) {
+            std::cerr << "[FC] RecordingSink failed to open log file under '" << log_dir
+                      << "'. Refusing to start.\n";
+            return nullptr;
+        }
+        return sink;
+    }
+    if (sink_kind == "fake") {
+        const char* host_env = std::getenv("FC_RC_FAKE_HOST");
+        const std::string host =
+            (host_env && *host_env) ? std::string(host_env) : std::string("127.0.0.1");
+        const char* port_env = std::getenv("FC_RC_FAKE_PORT");
+        int port = 9101;
+        if (port_env && *port_env) {
+            const char* end = port_env + std::strlen(port_env);
+            auto [ptr, ec] = std::from_chars(port_env, end, port);
+            if (ec != std::errc{} || ptr != end || port <= 0 || port > 65535) {
+                std::cerr << "[FC] Invalid FC_RC_FAKE_PORT='" << port_env
+                          << "', refusing to start (must be a base-10 integer in [1, 65535])\n";
+                return nullptr;
+            }
+        }
+        auto sink = std::make_unique<fc::FakeBetaflightSink>(host, port);
+        if (!sink->ok()) {
+            std::cerr << "[FC] FakeBetaflightSink failed to open UDP socket. Refusing to start.\n";
+            return nullptr;
+        }
+        return sink;
+    }
+    if (sink_kind == "msp") {
+        std::cerr << "[FC] FC_RC_SINK=msp is reserved for S0.8 (USB MSP driver) and is not yet "
+                     "implemented. Use 'null', 'recording', or 'fake' for now.\n";
+        return nullptr;
+    }
+    std::cerr << "[FC] Unknown FC_RC_SINK='" << sink_kind
+              << "'. Valid: null|recording|fake|msp. Falling back to 'null' is unsafe; refusing "
+                 "to start.\n";
+    return nullptr;
+}
+
 } // namespace
 
 int main() {
@@ -251,8 +308,15 @@ int main() {
     fc::FlightController flight_controller;
     flight_controller.setControlMode(fc::ControlMode::LandSafely);
 
+    std::unique_ptr<fc::IRcSink> rc_sink = make_rc_sink_from_env();
+    if (rc_sink == nullptr) {
+        command_server.stop();
+        return 1;
+    }
+
     std::cout << "[FC] fc_app running. CMD TCP:" << proto::TCP_CMD_PORT
-              << " TEL UDP:" << fc_tel_host << ":" << fc_tel_port << "\n";
+              << " TEL UDP:" << fc_tel_host << ":" << fc_tel_port << " RC sink=" << rc_sink->name()
+              << "\n";
 
     // Signed-modular int32 comparator on cmd.seq handles wrap correctly:
     // a fresh seq of 0 after CMD_SEQ_MAX is treated as "ahead by 1", not
@@ -354,9 +418,10 @@ int main() {
                          "this tick\n";
         }
 
-        (void)flight_controller.updateTimeStep(dt);
+        const fc::BetaFlightCommand rc_cmd = flight_controller.updateTimeStep(dt);
 
         const fc::TelemetryData& telemetry = flight_controller.getTelemetryData();
+        rc_sink->writeChannels(rc_cmd, telemetry.timestamp_s);
         const fc::TrackingMessage& tracking_message = flight_controller.getLastTrackingMessage();
 
         const std::string tel_json =

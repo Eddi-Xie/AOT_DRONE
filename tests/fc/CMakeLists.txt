@@ -24,3 +24,7 @@ add_test(NAME test_command_server_atomic COMMAND test_command_server_atomic)
 add_executable(test_locale_safe_json test_locale_safe_json.cpp)
 target_link_libraries(test_locale_safe_json PRIVATE fc)
 add_test(NAME test_locale_safe_json COMMAND test_locale_safe_json)
+
+add_executable(test_rc_sink test_rc_sink.cpp)
+target_link_libraries(test_rc_sink PRIVATE fc)
+add_test(NAME test_rc_sink COMMAND test_rc_sink)
