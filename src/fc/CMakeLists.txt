@@ -9,6 +9,7 @@ add_library(fc STATIC
     ${FC_IMPL_DIR}/FlightController.cpp
     ${FC_IMPL_DIR}/RcSink.cpp
     ${FC_IMPL_DIR}/MspFraming.cpp
+    ${FC_IMPL_DIR}/MspRcSink.cpp
 )
 
 target_include_directories(fc PUBLIC ${FC_HEADER_DIR})
