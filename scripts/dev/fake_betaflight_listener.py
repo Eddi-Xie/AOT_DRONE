@@ -59,7 +59,15 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="HIL: receive + assert FakeBetaflightSink RC datagrams"
     )
-    parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help=(
+            "Bind host (default: 127.0.0.1). Use 0.0.0.0 only for genuine "
+            "cross-machine HIL -- this listener has no auth, so 0.0.0.0 "
+            "accepts RC datagrams from any host on the LAN."
+        ),
+    )
     parser.add_argument("--port", type=int, default=9101, help="Bind UDP port (default: 9101)")
     parser.add_argument(
         "--duration-s",

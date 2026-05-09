@@ -124,6 +124,59 @@ void test_recording_sink_creates_missing_log_dir() {
     std::system(("rm -rf " + make_temp_subdir("rec_nested")).c_str());
 }
 
+void test_recording_sink_refuses_when_path_component_is_a_file() {
+    // Pre-fix: ensure_directory accepted EEXIST without S_ISDIR check, so
+    // FC_RC_LOG_DIR=<existing-file>/sub silently passed mkdir-p and fopen
+    // later failed with a confusing ENOTDIR-on-the-CSV-path message.
+    // Post-fix: refuse up front with the offending intermediate named.
+    const std::string base = make_temp_subdir("rec_file");
+    std::system(("rm -rf " + base).c_str());
+    // Create an ordinary file at the location we'll then try to mkdir
+    // through.
+    std::system(("mkdir -p " + base).c_str());
+    const std::string blocking_file = base + "/blocking_file";
+    {
+        std::FILE* f = std::fopen(blocking_file.c_str(), "w");
+        TEST_ASSERT(f != nullptr);
+        std::fclose(f);
+    }
+    const std::string log_dir = blocking_file + "/sub";
+
+    fc::RecordingSink sink(log_dir);
+    // Refused: ok() false, no path stored, no row written.
+    TEST_ASSERT(!sink.ok());
+    TEST_ASSERT(sink.rows_written() == 0U);
+
+    std::system(("rm -rf " + base).c_str());
+}
+
+void test_recording_sink_rows_lost_accessor_starts_zero() {
+    // The rows_lost() accessor was added in round 1 alongside the disk-
+    // failure ok()-flip. We don't have a portable way to inject an
+    // EIO/ENOSPC mid-run from a unit test (Linux's /dev/full doesn't
+    // exist on macOS; chmod-then-truncate races); the production
+    // contract is exercised manually via:
+    //
+    //   FC_RC_LOG_DIR=/dev/full FC_RC_SINK=recording fc_app   # Linux
+    //
+    // and by reading the round-1 commit's RcSink.cpp diff. This test
+    // pins the public-API surface so a future refactor that drops
+    // rows_lost() trips CI.
+    const std::string log_dir = make_temp_subdir("rec_lost");
+    std::system(("rm -rf " + log_dir).c_str());
+
+    fc::RecordingSink sink(log_dir);
+    TEST_ASSERT(sink.ok());
+    TEST_ASSERT(sink.rows_lost() == 0U);
+
+    fc::BetaFlightCommand cmd = makeNeutralCommand();
+    sink.writeChannels(cmd, 0.0);
+    TEST_ASSERT(sink.rows_lost() == 0U);
+    TEST_ASSERT(sink.rows_written() == 1U);
+
+    std::system(("rm -rf " + log_dir).c_str());
+}
+
 // Bind a UDP socket to a kernel-assigned ephemeral port so the test
 // doesn't fight with whatever else is on the box. Returns the fd and
 // fills *out_port with the assigned port number.
@@ -226,6 +279,8 @@ int main() {
     test_null_sink_smoke();
     test_recording_sink_writes_csv_with_header_and_rows();
     test_recording_sink_creates_missing_log_dir();
+    test_recording_sink_refuses_when_path_component_is_a_file();
+    test_recording_sink_rows_lost_accessor_starts_zero();
     test_fake_sink_sends_self_contained_json_datagram();
     test_fake_sink_seq_advances_per_frame();
     test_fake_sink_rejects_invalid_host_and_port();

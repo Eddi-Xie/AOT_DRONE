@@ -31,9 +31,12 @@ The HIL bench gives us:
 - **Sink-recording dry runs.** `RecordingSink` writes every channel write to
   CSV at the rate of the control loop. After a change, replay any recorded
   mission and diff the CSV against a baseline.
-- **Closed-loop fake-FC echoes.** `FakeBetaflightSink` emits MSP frames over
-  UDP that a Python harness (`fake_betaflight_listener.py`) receives,
-  decodes, and asserts against an expected channel sequence.
+- **Closed-loop fake-FC echoes.** `FakeBetaflightSink` emits one JSON
+  datagram per tick over UDP (see Section 3.3 for the wire format) that
+  a Python harness (`fake_betaflight_listener.py`) receives, decodes,
+  and asserts against an expected channel sequence. The binary MSPv1
+  framing lives in `MspRcSink` instead — it's the encoding firmware
+  expects, not what the test harness needs.
 - **Real-FC validation with motors detached.** `MspRcSink` drives a real
   Betaflight FC over USB or UART; Betaflight Configurator's "Receiver" tab
   visualises the channels. ESCs may be powered (no thrust without motors).
