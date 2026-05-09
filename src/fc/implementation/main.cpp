@@ -317,6 +317,14 @@ int main() {
 
     std::signal(SIGINT, handle_signal);
     std::signal(SIGTERM, handle_signal);
+    // Ignore SIGPIPE process-wide. MspRcSink::write_frame_ writes to a
+    // USB serial fd; a USB unplug or FC reboot can deliver SIGPIPE which
+    // would otherwise terminate fc_app outright, bypassing the carefully
+    // designed sink-degraded -> LandSafely failsafe path. With SIGPIPE
+    // ignored, write() returns EPIPE and the sink's hard-error branch
+    // closes the fd + flips ok() so main loop's parallel latch enters
+    // LandSafely on the next tick.
+    std::signal(SIGPIPE, SIG_IGN);
 
     // Default to loopback so a misconfigured deployment doesn't accidentally
     // expose the FC TCP listener to the LAN. Operators that intentionally need
@@ -507,8 +515,9 @@ int main() {
             // the entry-side branch). Auto-resume of a saved pre-failsafe
             // mode is the deferred two-stage state machine in S0.7.
             std::cerr << "[FC] CMD link recovered (age=" << cmd_age_s
-                      << "s); cleared failsafe latch; mode unchanged unless a CMD already applied "
-                         "this tick\n";
+                      << "s); cleared failsafe latch (sink_degraded still engaged: "
+                      << (sink_degraded_engaged ? "yes" : "no")
+                      << "); mode unchanged unless a CMD already applied this tick\n";
         }
 
         // Parallel sink-degraded latch (S0.8). MspRcSink flips ok()=false
@@ -524,8 +533,10 @@ int main() {
                       << "); entering LandSafely failsafe\n";
         } else if (!sink_degraded_now && sink_degraded_engaged) {
             sink_degraded_engaged = false;
-            std::cerr << "[FC] RC sink recovered; cleared sink-degraded latch; mode unchanged "
-                         "unless a CMD already applied this tick\n";
+            std::cerr << "[FC] RC sink recovered; cleared sink-degraded latch (CMD-stale "
+                         "failsafe still engaged: "
+                      << (failsafe_engaged ? "yes" : "no")
+                      << "); mode unchanged unless a CMD already applied this tick\n";
         }
 
         const fc::BetaFlightCommand rc_cmd = flight_controller.updateTimeStep(dt);

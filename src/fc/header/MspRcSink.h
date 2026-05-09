@@ -31,8 +31,10 @@
 #include "FlightController.h" // BetaFlightCommand
 #include "RcSink.h"           // IRcSink
 
+#include <chrono>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -83,6 +85,13 @@ class MspRcSink final : public IRcSink {
     std::uint64_t writes_attempted() const { return writes_attempted_; }
     std::uint64_t writes_succeeded() const { return writes_succeeded_; }
 
+    // Bad-checksum frames discarded by the parser. Bumped at every drain
+    // (boot probe, tuning probe, MSP_RC poll). A non-zero counter usually
+    // signals USB-CDC bit errors or a framing-state mismatch that should
+    // prompt the operator to reseat the cable; surfaced via TEL is a
+    // future enhancement.
+    std::uint64_t parse_errors() const { return parse_errors_; }
+
   private:
     explicit MspRcSink(int fd);
 
@@ -115,6 +124,13 @@ class MspRcSink final : public IRcSink {
     std::uint64_t tick_counter_ = 0;
     std::uint64_t writes_attempted_ = 0;
     std::uint64_t writes_succeeded_ = 0;
+    std::uint64_t parse_errors_ = 0;
+    // Last time an MSP_RC reply landed and updated arm_switch_. Used by
+    // poll_msp_rc_ to force arm_switch_=false if no reply has arrived
+    // within kArmSwitchStaleMs — without this guard, a USB hiccup or FC
+    // reboot loop could leave a stale "switch on" latch that S0.14's
+    // arm-authority gate would then act on.
+    std::optional<std::chrono::steady_clock::time_point> last_msp_rc_reply_time_;
     // Accumulator for incremental MSP_RC parse across polls. Boot
     // probes also feed it; their consumed-bytes drain leaves any tail
     // for the first regular poll to pick up.

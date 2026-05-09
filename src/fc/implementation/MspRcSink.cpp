@@ -29,6 +29,12 @@ constexpr double kTxRatioAlpha = 0.05;
 // in Configurator.
 constexpr std::size_t kMspRcAux1Offset = 8;
 constexpr std::uint16_t kArmSwitchThresholdUs = 1700;
+// Force arm_switch_=false if no MSP_RC reply has been seen for this long.
+// At the 5 Hz poll cadence this covers ~5 missed replies — enough to
+// distinguish a momentary blip from a real disconnect, while staying
+// well under S0.14's "switch held >=1 s" arm-gate window so a stale
+// latch can't be the deciding bit.
+constexpr long kArmSwitchStaleMs = 1000;
 
 // Boot probe pacing. 500 ms total is generous for a USB-CDC FC (replies
 // typically land in <100 ms); 50 ms select() polls keep the busy-loop
@@ -171,23 +177,45 @@ bool MspRcSink::write_frame_(const std::uint8_t* buf, std::size_t n) {
     if (fd_ < 0) {
         return false;
     }
-    // Up to two write() syscalls total — initial attempt plus one retry
-    // on EAGAIN/EINTR/short write. Anything beyond is treated as a
-    // persistent transport failure (fd closed; ok() flips false; main.cpp
-    // routes through the sink-degraded failsafe path in S0.8 commit 4).
+    // Retry policy: count CONSECUTIVE no-progress attempts (EAGAIN /
+    // EWOULDBLOCK / EINTR with no bytes advanced). Any successful write
+    // — even a 1-byte short write — resets the counter. Hitting the
+    // budget is a persistent transport failure: close the fd, flip ok()
+    // to false, main loop's sink-degraded latch routes to LandSafely.
+    //
+    // Counting progress and no-progress separately matters under sustained
+    // kernel-buffer pressure where w=1, EAGAIN, w=21 is a recoverable
+    // sequence — but the previous attempts-only cap would have classified
+    // it as a failsafe trigger after just two syscalls.
     std::size_t off = 0;
-    int attempts = 0;
-    constexpr int kMaxAttempts = 2;
+    int no_progress = 0;
+    // Hard cap on total syscalls: catches the pathological 1-byte-then-
+    // EAGAIN cycle that would otherwise loop indefinitely. 32 is generous
+    // for the 22-byte SET_RAW_RC frame (one syscall per byte plus 10
+    // EAGAINs) and unreachable in practice for a healthy USB-CDC FC.
+    int total_attempts = 0;
+    constexpr int kMaxNoProgress = 2; // initial try + one retry
+    constexpr int kMaxTotal = 32;
 
-    while (off < n && attempts < kMaxAttempts) {
-        ++attempts;
+    while (off < n && total_attempts < kMaxTotal) {
+        ++total_attempts;
         const ssize_t w = ::write(fd_, buf + off, n - off);
         if (w > 0) {
             off += static_cast<std::size_t>(w);
-            continue; // partial write counts toward the attempt budget
+            no_progress = 0; // any progress resets the budget
+            continue;
         }
         const int err = errno;
         if (w < 0 && (err == EAGAIN || err == EWOULDBLOCK || err == EINTR)) {
+            ++no_progress;
+            if (no_progress >= kMaxNoProgress) {
+                std::cerr << "[FC] MspRcSink: write blocked for " << no_progress
+                          << " consecutive no-progress attempts (" << off << "/" << n
+                          << " bytes); closing fd, ok() flipping to false\n";
+                ::close(fd_);
+                fd_ = -1;
+                return false;
+            }
             continue; // transient — retry
         }
         // Hard error or write()==0: persistent failure.
@@ -198,7 +226,7 @@ bool MspRcSink::write_frame_(const std::uint8_t* buf, std::size_t n) {
         return false;
     }
     if (off < n) {
-        std::cerr << "[FC] MspRcSink: write incomplete after " << attempts << " attempt(s) (" << off
+        std::cerr << "[FC] MspRcSink: write hit total-attempt cap " << kMaxTotal << " (" << off
                   << "/" << n << " bytes); closing fd, ok() flipping to false\n";
         ::close(fd_);
         fd_ = -1;
@@ -231,11 +259,24 @@ void drain_into(int fd, std::vector<std::uint8_t>& acc) {
 // Stops when the parser reports no progress (partial frame waiting for
 // more bytes). `on_frame` returns true to stop early (e.g. boot probe
 // found the cmd it was waiting for); false to keep draining.
-template <typename F> void parse_drain(std::vector<std::uint8_t>& acc, F on_frame) {
+//
+// Bad-checksum frames are logged with a running count via `parse_errors_ref`
+// (bumped each time). They never reach `on_frame` — the parser already
+// resyncs past them; this helper just makes the silent drop visible so
+// the operator can correlate USB issues with TEL-side symptoms.
+template <typename F>
+void parse_drain(std::vector<std::uint8_t>& acc, std::uint64_t& parse_errors_ref, F on_frame) {
     while (!acc.empty()) {
         const auto pr = fc::msp::parse_response(acc.data(), acc.size());
         if (pr.bytes_consumed > 0) {
             acc.erase(acc.begin(), acc.begin() + pr.bytes_consumed);
+        }
+        if (pr.checksum_error) {
+            ++parse_errors_ref;
+            std::cerr << "[FC] MspRcSink: dropped MSP frame with bad checksum (count="
+                      << parse_errors_ref
+                      << "); a small non-zero count is normal USB-CDC framing recovery, "
+                         "sustained growth points at a flaky cable\n";
         }
         if (pr.frame.has_value()) {
             if (on_frame(*pr.frame)) {
@@ -271,13 +312,21 @@ bool MspRcSink::run_boot_probe_() {
             drain_into(fd_, rx_buffer_);
 
             bool found = false;
-            parse_drain(rx_buffer_, [&](const fc::msp::ParsedFrame& f) {
+            parse_drain(rx_buffer_, parse_errors_, [&](const fc::msp::ParsedFrame& f) {
                 if (f.cmd == fc::msp::MSP_API_VERSION) {
                     std::cout << "[FC] MspRcSink: MSP_API_VERSION boot probe ok ("
                               << f.payload.size() << "-byte payload)\n";
                     found = true;
                     return true;
                 }
+                // Non-target frames during the boot-probe window are
+                // unusual but possible (residual replies from a previous
+                // session, out-of-order CDC delivery). Log so the
+                // operator can correlate "tuning probe failed" later
+                // with "an MSP_RC_TUNING reply got eaten here".
+                std::cerr << "[FC] MspRcSink: boot probe ignored unexpected MSP cmd="
+                          << static_cast<int>(f.cmd) << " (" << f.payload.size()
+                          << "-byte payload)\n";
                 return false;
             });
             if (found) {
@@ -315,7 +364,7 @@ void MspRcSink::run_tuning_probe_() {
             drain_into(fd_, rx_buffer_);
 
             bool found = false;
-            parse_drain(rx_buffer_, [&](const fc::msp::ParsedFrame& f) {
+            parse_drain(rx_buffer_, parse_errors_, [&](const fc::msp::ParsedFrame& f) {
                 if (f.cmd == fc::msp::MSP_RC_TUNING) {
                     std::cout << "[FC] MspRcSink: MSP_RC_TUNING reply (" << f.payload.size()
                               << "-byte payload, "
@@ -323,6 +372,9 @@ void MspRcSink::run_tuning_probe_() {
                     found = true;
                     return true;
                 }
+                std::cerr << "[FC] MspRcSink: tuning probe ignored unexpected MSP cmd="
+                          << static_cast<int>(f.cmd) << " (" << f.payload.size()
+                          << "-byte payload)\n";
                 return false;
             });
             if (found) {
@@ -333,8 +385,11 @@ void MspRcSink::run_tuning_probe_() {
     }
 
     std::cerr << "[FC] MspRcSink: MSP_RC_TUNING did not reply within " << kProbeTimeoutMs
-              << "ms; setting tuning_mismatch=true (Tracking/Takeoff "
-                 "transitions will be refused; deferring operator-confirm UI to S0.14)\n";
+              << "ms; setting tuning_mismatch=true. Tracking/Takeoff transitions will be "
+                 "refused for the rest of this fc_app process — there is no in-flight "
+                 "re-probe path in S0.8. Recovery: stop fc_app, reseat USB / power-cycle "
+                 "the FC, restart fc_app. Periodic re-probe + operator-confirm UI lands "
+                 "with S0.14 / Sprint 1 H2 UART pivot.\n";
     tuning_mismatch_ = true;
 }
 
@@ -344,16 +399,32 @@ void MspRcSink::poll_msp_rc_() {
     }
     drain_into(fd_, rx_buffer_);
 
-    parse_drain(rx_buffer_, [&](const fc::msp::ParsedFrame& f) {
+    parse_drain(rx_buffer_, parse_errors_, [&](const fc::msp::ParsedFrame& f) {
         if (f.cmd == fc::msp::MSP_RC && f.payload.size() >= kMspRcAux1Offset + 2) {
             const std::uint16_t aux1 =
                 static_cast<std::uint16_t>(f.payload[kMspRcAux1Offset]) |
                 static_cast<std::uint16_t>(
                     static_cast<std::uint16_t>(f.payload[kMspRcAux1Offset + 1]) << 8);
             arm_switch_ = (aux1 >= kArmSwitchThresholdUs);
+            last_msp_rc_reply_time_ = std::chrono::steady_clock::now();
         }
         return false; // keep draining — more frames may follow
     });
+
+    // Force-clear arm_switch_ if no MSP_RC reply has landed within the
+    // staleness window. Without this, a USB hiccup or FC reboot loop
+    // would freeze the latch at its last value — and S0.14's three-
+    // condition arm gate would then act on stale "switch on" state.
+    if (arm_switch_ && last_msp_rc_reply_time_.has_value()) {
+        const auto elapsed = std::chrono::steady_clock::now() - *last_msp_rc_reply_time_;
+        const auto elapsed_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+        if (elapsed_ms > kArmSwitchStaleMs) {
+            arm_switch_ = false;
+            std::cerr << "[FC] MspRcSink: forcing arm_switch=false (no MSP_RC reply for "
+                      << elapsed_ms << "ms, threshold=" << kArmSwitchStaleMs << "ms)\n";
+        }
+    }
 
     // Send a fresh MSP_RC query so the *next* poll has a current reply
     // to drain. write_frame_ failure here closes the fd and flips ok();
