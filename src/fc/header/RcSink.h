@@ -26,6 +26,8 @@
 
 #include "FlightController.h" // BetaFlightCommand
 
+#include <netinet/in.h> // sockaddr_in (cached destination in FakeBetaflightSink)
+
 #include <cstdio>
 #include <string>
 
@@ -96,11 +98,16 @@ class RecordingSink final : public IRcSink {
     // Test/diagnostic accessors.
     const std::string& path() const { return path_; }
     std::uint64_t rows_written() const { return rows_written_; }
+    std::uint64_t rows_lost() const { return rows_lost_; }
 
   private:
     std::string path_;
     std::FILE* file_ = nullptr;
     std::uint64_t rows_written_ = 0;
+    // Bumped when fprintf/fflush returns an error (full disk, read-only
+    // remount, EIO, etc). On the first such error we close file_ and let
+    // ok() flip false so the operator-facing health field flips to bad.
+    std::uint64_t rows_lost_ = 0;
 };
 
 // UDP echoes every channel write as a self-contained JSON datagram to a
@@ -140,6 +147,11 @@ class FakeBetaflightSink final : public IRcSink {
     std::string host_;
     int port_ = 0;
     int socket_fd_ = -1;
+    // Cached destination resolved once at construction so writeChannels'
+    // hot path doesn't re-parse the host string every tick. We store the
+    // raw sockaddr_in rather than just in_addr to keep the sendto call
+    // a single move-the-pointer-and-go.
+    sockaddr_in dest_addr_{};
     std::uint64_t seq_ = 0;
     std::uint64_t frames_sent_ = 0;
     std::uint64_t frames_dropped_ = 0;

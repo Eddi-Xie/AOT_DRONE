@@ -29,7 +29,14 @@ namespace {
 
 // mkdir -p equivalent. Walks the path, creating each intermediate
 // directory; returns true on success or if the directory already
-// exists. Errors out with a stderr message on failure.
+// exists AND is actually a directory. Errors out with a stderr
+// message on failure.
+//
+// The S_ISDIR check on EEXIST guards against operator typos like
+// FC_RC_LOG_DIR=/etc/hosts (an existing regular file) -- without the
+// check, mkdir would EEXIST-succeed silently and fopen would later
+// fail with a confusing ENOTDIR-style message naming the full CSV
+// path instead of the offending intermediate component.
 bool ensure_directory(const std::string& dir) {
     if (dir.empty()) {
         return true;
@@ -38,10 +45,19 @@ bool ensure_directory(const std::string& dir) {
     for (std::size_t i = 0; i <= dir.size(); ++i) {
         if (i == dir.size() || dir[i] == '/') {
             if (!accum.empty() && accum != "." && accum != "..") {
-                if (mkdir(accum.c_str(), 0755) != 0 && errno != EEXIST) {
-                    std::cerr << "[FC] RecordingSink: mkdir('" << accum
-                              << "') failed: " << std::strerror(errno) << "\n";
-                    return false;
+                if (mkdir(accum.c_str(), 0755) != 0) {
+                    if (errno != EEXIST) {
+                        std::cerr << "[FC] RecordingSink: mkdir('" << accum
+                                  << "') failed: " << std::strerror(errno) << "\n";
+                        return false;
+                    }
+                    struct stat st{};
+                    if (stat(accum.c_str(), &st) != 0 || !S_ISDIR(st.st_mode)) {
+                        std::cerr << "[FC] RecordingSink: path component '" << accum
+                                  << "' exists but is not a directory; refusing to write CSV "
+                                     "below it\n";
+                        return false;
+                    }
                 }
             }
         }
@@ -99,15 +115,31 @@ void RecordingSink::writeChannels(const BetaFlightCommand& cmd, double timestamp
     }
     // %.6f matches the TEL JSON precision so a row's timestamp_s lines
     // up with the corresponding TEL frame to the microsecond.
-    std::fprintf(file_, "%.6f,%u,%u,%u,%u,%u,%u,%u,%u\n", timestamp_s,
-                 static_cast<unsigned>(cmd.roll), static_cast<unsigned>(cmd.pitch),
-                 static_cast<unsigned>(cmd.yaw), static_cast<unsigned>(cmd.throttle),
-                 static_cast<unsigned>(cmd.aux1), static_cast<unsigned>(cmd.aux2),
-                 static_cast<unsigned>(cmd.aux3), static_cast<unsigned>(cmd.aux4));
+    const int written =
+        std::fprintf(file_, "%.6f,%u,%u,%u,%u,%u,%u,%u,%u\n", timestamp_s,
+                     static_cast<unsigned>(cmd.roll), static_cast<unsigned>(cmd.pitch),
+                     static_cast<unsigned>(cmd.yaw), static_cast<unsigned>(cmd.throttle),
+                     static_cast<unsigned>(cmd.aux1), static_cast<unsigned>(cmd.aux2),
+                     static_cast<unsigned>(cmd.aux3), static_cast<unsigned>(cmd.aux4));
     // fflush after every row so a SIGINT mid-run leaves a complete
     // tail. The throughput is 50 rows/sec (~3 KB/s) so the cost is
     // negligible relative to the diagnostic value.
-    std::fflush(file_);
+    const int flushed = std::fflush(file_);
+    if (written < 0 || flushed != 0 || std::ferror(file_)) {
+        // Disk full, read-only remount, EIO, etc. Close the file so
+        // ok() flips false; the operator can see the failure via
+        // rows_lost() and the (future S0.8) TEL `msp_tx_ratio` field.
+        // Log only on the FIRST error so a sustained failure doesn't
+        // spam stderr at 50 Hz.
+        if (rows_lost_ == 0) {
+            std::cerr << "[FC] RecordingSink write failure on '" << path_ << "' (errno=" << errno
+                      << " " << std::strerror(errno) << "); closing log + flipping ok() to false\n";
+        }
+        ++rows_lost_;
+        std::fclose(file_);
+        file_ = nullptr;
+        return;
+    }
     ++rows_written_;
 }
 
@@ -117,8 +149,12 @@ FakeBetaflightSink::FakeBetaflightSink(const std::string& host, int port)
         std::cerr << "[FC] FakeBetaflightSink: port " << port << " out of range [1, 65535]\n";
         return;
     }
-    sockaddr_in probe{};
-    if (inet_pton(AF_INET, host_.c_str(), &probe.sin_addr) != 1) {
+
+    // Resolve once and cache; writeChannels reuses dest_addr_ on every
+    // tick instead of re-parsing the host string at 50 Hz.
+    dest_addr_.sin_family = AF_INET;
+    dest_addr_.sin_port = htons(static_cast<std::uint16_t>(port_));
+    if (inet_pton(AF_INET, host_.c_str(), &dest_addr_.sin_addr) != 1) {
         std::cerr << "[FC] FakeBetaflightSink: invalid host '" << host_
                   << "', expected dotted-quad IPv4 literal (e.g. 127.0.0.1)\n";
         return;
@@ -164,16 +200,29 @@ void FakeBetaflightSink::writeChannels(const BetaFlightCommand& cmd, double time
         return;
     }
 
-    sockaddr_in dst{};
-    dst.sin_family = AF_INET;
-    dst.sin_port = htons(static_cast<std::uint16_t>(port_));
-    inet_pton(AF_INET, host_.c_str(), &dst.sin_addr); // validated in ctor
-
-    const ssize_t sent = ::sendto(socket_fd_, buf, static_cast<std::size_t>(n),
-                                  /*flags=*/0, reinterpret_cast<sockaddr*>(&dst), sizeof(dst));
+    const ssize_t sent =
+        ::sendto(socket_fd_, buf, static_cast<std::size_t>(n),
+                 /*flags=*/0, reinterpret_cast<const sockaddr*>(&dest_addr_), sizeof(dest_addr_));
     if (sent < 0) {
-        // EAGAIN / ENOBUFS / EINTR: tolerate, count, keep going.
+        const int e = errno;
+        // Soft errors -- bumping frames_dropped_ keeps ok() true and the
+        // FC main loop ticking; the cause is upstream backpressure /
+        // signal. Hard errors (closed fd, not-a-socket, no route to host)
+        // mean the sink is wedged: close the fd so ok() flips false and
+        // the operator can see the failure shape.
+        const bool soft = (e == EAGAIN || e == EWOULDBLOCK || e == ENOBUFS || e == EINTR);
+        if (soft) {
+            ++frames_dropped_;
+            return;
+        }
+        // First hard error: log once + close the fd. Subsequent calls
+        // hit the (socket_fd_ < 0) early-return at the top of this
+        // function with no further log spam.
+        std::cerr << "[FC] FakeBetaflightSink: sendto failed irrecoverably (errno=" << e << " "
+                  << std::strerror(e) << "); closing socket + flipping ok() to false\n";
         ++frames_dropped_;
+        ::close(socket_fd_);
+        socket_fd_ = -1;
         return;
     }
     ++frames_sent_;

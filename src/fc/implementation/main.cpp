@@ -217,7 +217,6 @@ std::unique_ptr<fc::IRcSink> make_rc_sink_from_env() {
                      "implemented. Use 'null', 'recording', or 'fake' for now.\n";
         return nullptr;
     }
-    // 'fake' is added in the next commit in this branch.
     std::cerr << "[FC] Unknown FC_RC_SINK='" << sink_kind
               << "'. Valid: null|recording|fake|msp. Falling back to 'null' is unsafe; refusing "
                  "to start.\n";

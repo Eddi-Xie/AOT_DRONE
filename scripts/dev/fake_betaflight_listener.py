@@ -133,7 +133,19 @@ def main() -> int:
     args = parse_args()
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind((args.host, args.port))
+    try:
+        sock.bind((args.host, args.port))
+    except OSError as exc:
+        # Most common case: a previous listener is still running on the
+        # same port. Without the guard this raised an unfriendly
+        # traceback + exit 1, contradicting the documented "exit 0/2"
+        # contract that runall.sh and CI gate on.
+        print(
+            f"[harness] FAIL: bind {args.host}:{args.port}: {exc}",
+            file=sys.stderr,
+        )
+        sock.close()
+        return 2
     sock.settimeout(0.25)
 
     print(
