@@ -238,7 +238,7 @@ Priority within Sprint 0: P0 → P1 → P2. P0 must be green by May 11; P1 shoul
 
 ### S0.7 — HIL bench scaffold (`IRcSink` abstraction)
 
-- [ ] Define `src/fc/header/RcSink.h`:
+- [x] Define `src/fc/header/RcSink.h`:
   ```cpp
   namespace fc {
   class IRcSink {
@@ -250,14 +250,14 @@ Priority within Sprint 0: P0 → P1 → P2. P0 must be green by May 11; P1 shoul
   };
   }
   ```
-- [ ] `NullSink` (default; logs first call, then silent).
-- [ ] `RecordingSink` (writes every channel write to `logs/hil/sink_<utc>.csv`).
-- [ ] `FakeBetaflightSink` (UDP-echoes received channels for the Python harness).
-- [ ] Plumb sink into `main.cpp` via env `FC_RC_SINK=null|recording|fake|msp`.
-- [ ] C++ unit test: `tests/fc/test_rc_sink.cpp` using a minimal in-tree gtest setup or CTest harness — match repo style.
-- [ ] Python harness: `scripts/dev/fake_betaflight_listener.py` listening on UDP, decoding channel writes, asserting expected sequences.
-- [ ] Document in `docs/hil.md`: launch `fc_app` with `FC_RC_SINK=fake` + Python listener + `scripts/dev/replay_mission.py` → recorded mission round-trip.
-- [ ] **Acceptance:** `FC_RC_SINK=recording ./build/src/fc/fc_app` produces `logs/hil/sink_*.csv` with 50 Hz channel writes; `FC_RC_SINK=fake` mode round-trips through Python listener.
+- [x] `NullSink` (default; logs first call, then silent).
+- [x] `RecordingSink` (writes every channel write to `logs/hil/sink_<utc>.csv`).
+- [x] `FakeBetaflightSink` (UDP-echoes received channels for the Python harness).
+- [x] Plumb sink into `main.cpp` via env `FC_RC_SINK=null|recording|fake|msp`.
+- [x] C++ unit test: `tests/fc/test_rc_sink.cpp` using a minimal in-tree gtest setup or CTest harness — match repo style.
+- [x] Python harness: `scripts/dev/fake_betaflight_listener.py` listening on UDP, decoding channel writes, asserting expected sequences.
+- [x] Document in `docs/hil.md`: launch `fc_app` with `FC_RC_SINK=fake` + Python listener + `scripts/dev/replay_mission.py` → recorded mission round-trip.
+- [x] **Acceptance:** `FC_RC_SINK=recording ./build/src/fc/fc_app` produces `logs/hil/sink_*.csv` with 50 Hz channel writes; `FC_RC_SINK=fake` mode round-trips through Python listener.
 
 ### S0.8 — USB MSP driver (testable at home)
 
@@ -1238,5 +1238,108 @@ If Eddi can move past these without John, they go in Sprint 0:
   `chore/sprint0-hil-bench` once this PR merges. S0.7 is the gate for
   unblocking the deferred Manual+arm:true ordering fix from S0.4
   (per ADR-004).
+
+### 2026-05-08 — Eddi + Claude — S0.7 HIL bench scaffold (`chore/sprint0-hil-bench`)
+
+- Branch `chore/sprint0-hil-bench` off `dev` (post-merge of
+  `chore/sprint0-webapp-software` PR #26, head `b8c61d7`). Six
+  logical commits + Progress Log:
+  1. `feat(fc): IRcSink abstraction + NullSink + main.cpp plumbing` —
+     introduces `src/fc/header/RcSink.h` with the abstract interface
+     (`writeChannels`, `ok`, `name`) plus the default `NullSink` that
+     matches the legacy `(void)flight_controller.updateTimeStep(dt)`
+     discard behaviour but counts writes and logs the first call for
+     diagnostics. `make_rc_sink_from_env()` reads `FC_RC_SINK=null|
+     recording|fake|msp`; `msp` errors out as a placeholder for S0.8.
+     `main.cpp` swaps the `(void)` cast for
+     `auto rc_cmd = ...; rc_sink->writeChannels(rc_cmd, telemetry.timestamp_s)`.
+     1 ctest case (NullSink smoke).
+  2. `feat(fc): RecordingSink writes 50 Hz channel CSV for HIL replay`
+     — append-only CSV log to `<FC_RC_LOG_DIR>/sink_<UTC>.csv`
+     (default `logs/hil/`). Schema:
+     `timestamp_s,roll,pitch,yaw,throttle,aux1,aux2,aux3,aux4`,
+     `%.6f` timestamp matching the TEL JSON precision so rows align
+     to the microsecond. `mkdir -p` on missing dir; `fflush` after
+     every row so SIGINT mid-run leaves a complete tail. 2 ctest
+     cases (CSV header + content; nested dir creation).
+  3. `feat(fc): FakeBetaflightSink UDP-echoes channels as JSON` —
+     emits one self-contained JSON datagram per tick to a configured
+     `FC_RC_FAKE_HOST`:`FC_RC_FAKE_PORT` (default `127.0.0.1:9101`,
+     clear of TEL/CMD/VIS). Wire format:
+     `{"type":"RC","seq":N,"timestamp_s":T,"channels":[r,p,y,t,a1..a4]}`.
+     Stack-allocated 256-byte snprintf — no heap on the fast path.
+     Tolerates transient `EAGAIN`/`ENOBUFS` (counts but doesn't flip
+     `ok()`). 3 ctest cases (loopback UDP roundtrip + seq advance +
+     reject invalid host/port).
+  4. `feat(scripts): HIL harness — fake_betaflight_listener.py +
+     replay_mission.py` — Python harness scripts.
+     `fake_betaflight_listener.py` binds UDP on `127.0.0.1:9101`,
+     decodes incoming RC frames, and asserts seq monotonicity (with
+     bounded gap tolerance), observed Hz vs expected (default 50 Hz
+     +/- 30%), every channel in [1000, 2000] µs, and a minimum frame
+     count. Exit 0 on success, 2 on any asserted-invariant failure
+     so CI can gate on it. `replay_mission.py` is a stub that reads
+     a RecordingSink CSV and prints rows / duration / Hz / per-
+     channel min/max/mean; `--check-band` flags out-of-band samples.
+     10 pytest cases (decode_frame happy + 4 reject paths,
+     is_in_band boundaries, replay_mission CLI smoke for
+     happy/missing-file/header-mismatch/oob).
+  5. `docs(hil): align hil.md with the S0.7 implementation` — refresh
+     pre-existing hil.md (written speculatively in S0.1) to match
+     what landed: status banner, actual CSV schema, actual JSON wire
+     format for FakeBetaflightSink, env-var inventory
+     (`FC_RC_SINK`, `FC_RC_LOG_DIR`, `FC_RC_FAKE_HOST/PORT`), end-to-
+     end Quickstart with copy-paste commands for both flows.
+- Verification:
+  - `cmake --build build -j` clean.
+  - `ctest --test-dir build` => 6/6 (was 5/5; +1 for `test_rc_sink`
+    with 6 sub-cases).
+  - `python -m pytest tests/test_hil_harness.py -q` => 10 passed.
+  - End-to-end smoke (fc_app -> FakeBetaflightSink -> listener):
+    `python scripts/dev/fake_betaflight_listener.py --duration-s 1.5
+    --min-frames 30 &` + `FC_RC_SINK=fake ./build/src/fc/fc_app`
+    -> received=64 seq=0..63 gaps=0 observed_hz=49.85 (target 50.0)
+    decode_errors=0; listener exit 0.
+  - End-to-end smoke (FC -> RecordingSink CSV):
+    `FC_RC_SINK=recording FC_RC_LOG_DIR=/tmp/rec ./build/src/fc/fc_app`
+    -> `/tmp/rec/sink_20260508T222239Z.csv` with 50 Hz channel rows.
+- New env vars (deserve a future deployment-guide entry alongside the
+  S0.3 / S0.4 / S0.5 / S0.6 inventory):
+  - `FC_RC_SINK=null|recording|fake|msp`
+  - `FC_RC_LOG_DIR` (recording)
+  - `FC_RC_FAKE_HOST`, `FC_RC_FAKE_PORT` (fake)
+- Out of scope (deferred):
+  - **S0.8** — `MspRcSink` (USB MSP driver). Reuses the same
+    `IRcSink` interface, so it's a transport swap rather than a
+    rewrite. Until landed, `FC_RC_SINK=msp` errors out at startup.
+    This is the next sprint task on `chore/sprint0-msp-driver`.
+  - **Sprint 1** — full `replay_mission.py` CMD-injection mode +
+    `record_mission.py` capture utility. Captures (VIS UDP, CMD TCP)
+    timelines as JSONL, replays them into the FC's TCP listener,
+    asserts the resulting RecordingSink CSV matches a recorded
+    baseline within tolerance.
+  - **Sprint 1 H3** — real-FC bench acceptance with motors detached.
+  - **Sprint 1 P1.7** — latency probe (vision -> MSP <100 ms p95).
+- Process notes:
+  - The IRcSink interface is the single biggest design win in this
+    branch. Sprint 0.8's MspRcSink, Sprint 1 H2's MspUartSink, and
+    any future test-only sinks plug into the same boundary with no
+    other FC code changes — exactly the "transport pivot is a swap,
+    not a rewrite" property ADR-005 promised.
+  - JSON-line wire format for FakeBetaflightSink (rather than
+    MSPv1 binary) was a deliberate choice: it makes the Python
+    listener a single `json.loads` away from operational, parallel
+    with the TEL/VIS UDP shape. The actual MSPv1 framing lives in
+    MspRcSink where it has to talk to firmware.
+  - The listener's "channel band" assertion ([1000, 2000] µs) is the
+    last line of defence against a future controller bug writing
+    out-of-band µs values to a real flight controller. Even though
+    today's `clampCommandChannels` already enforces this, having
+    the harness re-check at the wire boundary means a controller
+    refactor that bypasses the clamp will trip CI before it trips
+    a real ESC.
+- Next session: S0.8 (USB MSP driver — `MspRcSink`, MSPv1 framing,
+  boot probes, Betaflight Configurator visual acceptance). Branch
+  `chore/sprint0-msp-driver` once this PR merges.
 
 ### (future entries here)
