@@ -42,12 +42,6 @@ namespace fc {
 
 class MspRcSink final : public IRcSink {
   public:
-    // Whether the constructor should run the MSP_API_VERSION + MSP_RC_TUNING
-    // probes. Production (`from_device`) always says Yes; the test seam
-    // (`make_for_testing`) takes a socketpair fd and skips probes since the
-    // kernel-pipe peer doesn't speak MSP.
-    enum class OwnsBootProbe { Yes, No };
-
     // Production factory. Opens the serial device, configures termios
     // (115200 8N1 raw, VMIN=0, VTIME=0, no flow control), and runs both
     // probes. Returns nullptr on open()/tcgetattr/tcsetattr/baud-rate
@@ -56,11 +50,13 @@ class MspRcSink final : public IRcSink {
     static std::unique_ptr<MspRcSink> from_device(const std::string& path, int baud);
 
     // Test seam. Takes ownership of a pre-opened fd (typically from
-    // socketpair(2) in unit tests) and skips open()/termios/probes when
-    // probe == OwnsBootProbe::No. Use Yes only when a test wires a fake
-    // FC that actually replies to MSP — the tests in test_msp_rc_sink.cpp
-    // construct synthetic replies on the peer fd directly.
-    static std::unique_ptr<MspRcSink> make_for_testing(int fd, OwnsBootProbe probe);
+    // socketpair(2) in unit tests) and skips open() / termios / probes —
+    // the kernel-pipe peer doesn't speak MSP. Tests that need to drive
+    // probe behaviour stage synthetic $M> replies on the peer fd before
+    // exercising writeChannels(); a "run probes against this fd" mode
+    // was tried and removed (review finding #10) because no test could
+    // exercise it without a fully-implemented fake FC.
+    static std::unique_ptr<MspRcSink> make_for_testing(int fd);
 
     ~MspRcSink() override;
     MspRcSink(const MspRcSink&) = delete;

@@ -97,14 +97,8 @@ MspRcSink::~MspRcSink() {
     }
 }
 
-std::unique_ptr<MspRcSink> MspRcSink::make_for_testing(int fd, OwnsBootProbe probe) {
-    auto sink = std::unique_ptr<MspRcSink>(new MspRcSink(fd));
-    if (probe == OwnsBootProbe::Yes) {
-        if (sink->run_boot_probe_()) {
-            sink->run_tuning_probe_();
-        }
-    }
-    return sink;
+std::unique_ptr<MspRcSink> MspRcSink::make_for_testing(int fd) {
+    return std::unique_ptr<MspRcSink>(new MspRcSink(fd));
 }
 
 std::unique_ptr<MspRcSink> MspRcSink::from_device(const std::string& path, int baud) {

@@ -89,7 +89,7 @@ void test_make_for_testing_constructs_healthy_sink() {
     TEST_ASSERT(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
     make_socketpair_nonblocking(sv);
 
-    auto sink = fc::MspRcSink::make_for_testing(sv[0], fc::MspRcSink::OwnsBootProbe::No);
+    auto sink = fc::MspRcSink::make_for_testing(sv[0]);
     TEST_ASSERT(sink != nullptr);
     TEST_ASSERT(sink->ok());
     TEST_ASSERT(sink->name() == "msp");
@@ -109,11 +109,22 @@ void test_writechannels_emits_msp_set_raw_rc_frame() {
     TEST_ASSERT(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
     make_socketpair_nonblocking(sv);
 
-    auto sink = fc::MspRcSink::make_for_testing(sv[0], fc::MspRcSink::OwnsBootProbe::No);
+    auto sink = fc::MspRcSink::make_for_testing(sv[0]);
     TEST_ASSERT(sink->ok());
 
-    fc::BetaFlightCommand cmd = makeNeutralCommand();
-    cmd.throttle = 1234;
+    // Distinguishable per-channel values so a future bug that swaps two
+    // channel positions in writeChannels is caught. With every channel
+    // at 1500 (the previous test's choice) a roll/pitch/yaw permutation
+    // would still produce identical bytes 5..10.
+    fc::BetaFlightCommand cmd;
+    cmd.roll = 1100;
+    cmd.pitch = 1200;
+    cmd.yaw = 1300;
+    cmd.throttle = 1400;
+    cmd.aux1 = 1500;
+    cmd.aux2 = 1600;
+    cmd.aux3 = 1700;
+    cmd.aux4 = 1800;
     sink->writeChannels(cmd, 0.020);
 
     // After the SET_RAW_RC heartbeat, the first writeChannels also runs
@@ -121,33 +132,37 @@ void test_writechannels_emits_msp_set_raw_rc_frame() {
     // sends an MSP_RC query. Read everything that arrived at the peer.
     std::uint8_t rx[128] = {0};
     const ssize_t n = ::read(sv[1], rx, sizeof(rx));
-    TEST_ASSERT(n >= 22); // at minimum the 22-byte SET_RAW_RC frame
+    TEST_ASSERT(n == 22 + 6); // SET_RAW_RC frame + trailing MSP_RC query
 
-    // First 22 bytes must be MSP_SET_RAW_RC: $M< 0x10 0xC8 + 16-byte
-    // payload + checksum.
+    // Header.
     TEST_ASSERT(rx[0] == 0x24); // $
     TEST_ASSERT(rx[1] == 0x4D); // M
     TEST_ASSERT(rx[2] == 0x3C); // <
     TEST_ASSERT(rx[3] == 0x10); // size = 16
     TEST_ASSERT(rx[4] == 0xC8); // cmd = MSP_SET_RAW_RC
 
-    // Channel layout: roll, pitch, yaw, throttle, aux1, aux2, aux3, aux4.
-    // throttle=1234 → 0x04D2 LE = D2 04 at payload offset 6 (byte 11).
-    TEST_ASSERT(rx[11] == 0xD2);
-    TEST_ASSERT(rx[12] == 0x04);
-    // aux2 (channel 5) = 2000 → 0x07D0 LE = D0 07 at payload offset 10
-    // (byte 15).
-    TEST_ASSERT(rx[15] == 0xD0);
-    TEST_ASSERT(rx[16] == 0x07);
+    // Verify each channel encodes at the right offset, little-endian.
+    // Channel order is roll, pitch, yaw, throttle, aux1, aux2, aux3, aux4
+    // matching the order written into BetaFlightCommand by FlightController.
+    const std::uint16_t expected[8] = {1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800};
+    for (std::size_t i = 0; i < 8; ++i) {
+        const std::uint16_t got =
+            static_cast<std::uint16_t>(rx[5 + 2 * i]) |
+            static_cast<std::uint16_t>(static_cast<std::uint16_t>(rx[5 + 2 * i + 1]) << 8);
+        TEST_ASSERT(got == expected[i]);
+    }
+
+    // Verify checksum: xor over [size, cmd, payload].
+    std::uint8_t cksum_expected = 0x10 ^ 0xC8;
+    for (std::size_t i = 0; i < 16; ++i) {
+        cksum_expected ^= rx[5 + i];
+    }
+    TEST_ASSERT(rx[21] == cksum_expected);
 
     TEST_ASSERT(sink->writes_attempted() == 1U);
     TEST_ASSERT(sink->writes_succeeded() == 1U);
     // EWMA stays at 1.0 after a single success: 0.95*1.0 + 0.05*1.0 = 1.0.
     TEST_ASSERT(sink->tx_ratio() == 1.0);
-
-    // Bytes 22..n are the trailing MSP_RC query from poll_msp_rc_.
-    // Non-essential to this test but assert size is consistent.
-    TEST_ASSERT(n == 22 + 6); // SET_RAW_RC + MSP_RC query
 
     ::close(sv[1]);
 }
@@ -157,7 +172,7 @@ void test_writechannels_persistent_failure_closes_fd_and_drops_tx_ratio() {
     TEST_ASSERT(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
     make_socketpair_nonblocking(sv);
 
-    auto sink = fc::MspRcSink::make_for_testing(sv[0], fc::MspRcSink::OwnsBootProbe::No);
+    auto sink = fc::MspRcSink::make_for_testing(sv[0]);
     TEST_ASSERT(sink->ok());
 
     // Close the peer; sink writes will fail with EPIPE / ECONNRESET.
@@ -198,7 +213,7 @@ void test_arm_switch_latches_when_aux1_above_threshold() {
     const ssize_t w = ::write(sv[1], reply.data(), reply.size());
     TEST_ASSERT(w == static_cast<ssize_t>(reply.size()));
 
-    auto sink = fc::MspRcSink::make_for_testing(sv[0], fc::MspRcSink::OwnsBootProbe::No);
+    auto sink = fc::MspRcSink::make_for_testing(sv[0]);
     TEST_ASSERT(!sink->arm_switch()); // initial state before any poll
 
     // First writeChannels triggers poll_msp_rc_ on tick 0, which drains
@@ -208,6 +223,52 @@ void test_arm_switch_latches_when_aux1_above_threshold() {
 
     TEST_ASSERT(sink->arm_switch() == true);
     TEST_ASSERT(sink->ok());
+
+    ::close(sv[1]);
+}
+
+void test_arm_switch_latch_transitions_back_to_false_on_below_threshold_reply() {
+    // Sequence: arm_switch flips true after a 1800 µs reply, then must
+    // flip back to false on a subsequent 1500 µs reply. The latch is
+    // not sticky — a future "require N consecutive samples" change would
+    // need to update this test, which is the point.
+    int sv[2];
+    TEST_ASSERT(::socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    make_socketpair_nonblocking(sv);
+
+    auto sink = fc::MspRcSink::make_for_testing(sv[0]);
+    TEST_ASSERT(!sink->arm_switch());
+
+    fc::BetaFlightCommand cmd = makeNeutralCommand();
+
+    // Stage 1: aux1=1800 (above threshold). Trigger poll on tick 0.
+    {
+        std::uint16_t channels_high[8] = {1500, 1500, 1500, 1500, 1800, 1500, 1500, 1500};
+        const auto payload = encode_msp_rc_payload(channels_high);
+        const auto reply = build_msp_response(fc::msp::MSP_RC, payload);
+        const ssize_t w = ::write(sv[1], reply.data(), reply.size());
+        TEST_ASSERT(w == static_cast<ssize_t>(reply.size()));
+    }
+    sink->writeChannels(cmd, 0.020); // tick 0 → poll runs
+    TEST_ASSERT(sink->arm_switch() == true);
+
+    // Stage 2: drive the next 9 writeChannels (no poll) while keeping the
+    // peer-side fed with a below-threshold reply. The 10th call (tick 10)
+    // polls again and should flip the latch back to false.
+    for (int i = 1; i <= 9; ++i) {
+        sink->writeChannels(cmd, 0.020 + 0.020 * i);
+    }
+    TEST_ASSERT(sink->arm_switch() == true); // unchanged across non-poll ticks
+
+    {
+        std::uint16_t channels_low[8] = {1500, 1500, 1500, 1500, 1500, 1500, 1500, 1500};
+        const auto payload = encode_msp_rc_payload(channels_low);
+        const auto reply = build_msp_response(fc::msp::MSP_RC, payload);
+        const ssize_t w = ::write(sv[1], reply.data(), reply.size());
+        TEST_ASSERT(w == static_cast<ssize_t>(reply.size()));
+    }
+    sink->writeChannels(cmd, 0.020 + 0.020 * 10); // tick 10 → poll runs
+    TEST_ASSERT(sink->arm_switch() == false);
 
     ::close(sv[1]);
 }
@@ -224,7 +285,7 @@ void test_arm_switch_stays_false_when_aux1_below_threshold() {
     const ssize_t w = ::write(sv[1], reply.data(), reply.size());
     TEST_ASSERT(w == static_cast<ssize_t>(reply.size()));
 
-    auto sink = fc::MspRcSink::make_for_testing(sv[0], fc::MspRcSink::OwnsBootProbe::No);
+    auto sink = fc::MspRcSink::make_for_testing(sv[0]);
 
     fc::BetaFlightCommand cmd = makeNeutralCommand();
     sink->writeChannels(cmd, 0.020);
@@ -261,6 +322,7 @@ int main() {
     test_writechannels_emits_msp_set_raw_rc_frame();
     test_writechannels_persistent_failure_closes_fd_and_drops_tx_ratio();
     test_arm_switch_latches_when_aux1_above_threshold();
+    test_arm_switch_latch_transitions_back_to_false_on_below_threshold_reply();
     test_arm_switch_stays_false_when_aux1_below_threshold();
     test_irc_sink_defaults_for_non_msp_sinks();
     return 0;
