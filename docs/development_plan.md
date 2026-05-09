@@ -1342,4 +1342,57 @@ If Eddi can move past these without John, they go in Sprint 0:
   boot probes, Betaflight Configurator visual acceptance). Branch
   `chore/sprint0-msp-driver` once this PR merges.
 
+### 2026-05-08 — Eddi + Claude — S0.7 review follow-ups + merge
+
+- Single-agent comprehensive review on `chore/sprint0-hil-bench` after
+  the initial 6 commits surfaced 3 MAJOR + 3 MINOR + 1 NIT findings.
+  Two follow-up commits in the same branch:
+  1. `fix(fc,scripts): S0.7 review-driven correctness fixes (round 1)`
+     — RecordingSink swallowed `fprintf`/`fflush` errors and `ok()`
+     lied under disk-full / read-only-mount; FakeBetaflightSink
+     ignored fatal errnos (the comment promised soft-only but the
+     code soft-dropped EVERYTHING including `EBADF`/`ENOTSOCK`);
+     stale "added in next commit" comment in main.cpp; cached
+     `inet_pton` resolution at construction (was re-running 50
+     times/sec); `ensure_directory` now `stat()`s on `EEXIST` and
+     verifies `S_ISDIR` so `FC_RC_LOG_DIR=/etc/hosts` is rejected
+     with a clear diagnostic; listener bind wrapped in
+     `try/except OSError` so "address already in use" exits 2 with
+     a friendly message instead of unhandled traceback.
+  2. `test(fc,scripts): close S0.7 review test gaps + doc fix
+     (round 2)` — 6 new evaluator tests on
+     `_evaluate_and_report` (under-min-frames, Hz upper/lower/
+     inclusive bounds, strict-mode-fails-on-decode-error); new
+     `tests/test_fc_rc_sink_env.py` (9 cases) drives `fc_app` via
+     subprocess for each `FC_RC_SINK` error path so a S0.8 swap
+     can't break the dispatch silently; 2 new C++ test cases
+     covering the round-1 `S_ISDIR` fix and the new `rows_lost()`
+     accessor; `docs/hil.md` line 34 fixed (said "MSP frames over
+     UDP" — actually JSON datagrams, with rationale); listener
+     `--host` help text now warns that `0.0.0.0` exposes the
+     listener LAN-wide without auth.
+- Final test counts at PR-merge (PR #27, dev HEAD `6c99af8`):
+  - `ctest` 6/6 (test_rc_sink: 8 sub-cases)
+  - `pytest` 169 passed, 1 skipped, 1 xfailed (was 154 on dev;
+    +15 across `test_hil_harness.py` and the new
+    `test_fc_rc_sink_env.py`)
+  - `vitest` 114 passed (untouched)
+- Process notes:
+  - The single-agent comprehensive-review pattern (vs the 3-agent
+    parallel review used on S0.5/S0.6) was sufficient here because
+    the surface area is smaller and the contracts are simpler. The
+    multi-agent pattern remains worth it for cross-cutting changes
+    (webapp + backend + FC); for a self-contained sink swap one
+    thorough agent finds the same defects.
+  - Subprocess-driven env-var tests against the real `fc_app`
+    binary (rather than refactoring `make_rc_sink_from_env` to
+    accept an injectable env source) keep the production code
+    simple and validate the actual operator-facing config knob,
+    not a stub. Cost: tests need the binary to be built first
+    (handled via `pytest.mark.skipif` so a fresh checkout doesn't
+    error).
+- Next session: S0.8 (USB MSP driver — `MspRcSink`, MSPv1 framing,
+  boot probes, Betaflight Configurator visual acceptance). Branch
+  `chore/sprint0-msp-driver` off `dev` HEAD `6c99af8`.
+
 ### (future entries here)
