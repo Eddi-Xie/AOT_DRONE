@@ -401,6 +401,37 @@ void MspRcSink::poll_msp_rc_() {
                     static_cast<std::uint16_t>(f.payload[kMspRcAux1Offset + 1]) << 8);
             arm_switch_ = (aux1 >= kArmSwitchThresholdUs);
             last_msp_rc_reply_time_ = std::chrono::steady_clock::now();
+
+            // Bench-verification log: print the FC's view of all 8 RC
+            // channels on each MSP_RC reply (≈5 Hz at our poll cadence).
+            // This is the substitute for Configurator's Receiver tab —
+            // USB-CDC port exclusivity means fc_app and Configurator
+            // can't share the FC at the same time, so the operator
+            // watches this stream while driving setpoints from the
+            // webapp. A payload of <16 bytes (FCs with <8 channels
+            // configured) silently skips the full-channel log; aux1
+            // alone is still latched for arm_switch.
+            if (f.payload.size() >= 16) {
+                std::uint16_t ch[8];
+                for (std::size_t i = 0; i < 8; ++i) {
+                    ch[i] = static_cast<std::uint16_t>(f.payload[2 * i]) |
+                            static_cast<std::uint16_t>(
+                                static_cast<std::uint16_t>(f.payload[2 * i + 1]) << 8);
+                }
+                // MSP_RC reply is in Betaflight's INTERNAL channel order
+                // (RPYT1234), NOT the AETR1234 wire order that
+                // MSP_SET_RAW_RC writes. Betaflight's msp.c case MSP_RC
+                // just dumps rcData[] indexed by its rc.h constants
+                // (ROLL=0, PITCH=1, YAW=2, THROTTLE=3, AUX1=4...) —
+                // no rcmap reverse-applied. So position 2 here is YAW
+                // and position 3 is THROTTLE. The asymmetry is a quirk
+                // of how Betaflight's MSP layer is wired and is fixed
+                // regardless of FC config. See the writeChannels
+                // comment block for the other half of the asymmetry.
+                std::cout << "[FC] MspRcSink: MSP_RC=[r=" << ch[0] << " p=" << ch[1]
+                          << " y=" << ch[2] << " t=" << ch[3] << " a1=" << ch[4] << " a2=" << ch[5]
+                          << " a3=" << ch[6] << " a4=" << ch[7] << "]\n";
+            }
         }
         return false; // keep draining — more frames may follow
     });
