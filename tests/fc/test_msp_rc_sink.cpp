@@ -142,9 +142,12 @@ void test_writechannels_emits_msp_set_raw_rc_frame() {
     TEST_ASSERT(rx[4] == 0xC8); // cmd = MSP_SET_RAW_RC
 
     // Verify each channel encodes at the right offset, little-endian.
-    // Channel order is roll, pitch, yaw, throttle, aux1, aux2, aux3, aux4
-    // matching the order written into BetaFlightCommand by FlightController.
-    const std::uint16_t expected[8] = {1100, 1200, 1300, 1400, 1500, 1600, 1700, 1800};
+    // Wire order is MSPv1's fixed AETR1234: Aileron (Roll), Elevator
+    // (Pitch), Throttle, Rudder (Yaw), then AUX1..4. cmd.throttle (1400)
+    // must land at position 2 and cmd.yaw (1300) at position 3 — the
+    // pre-bench test pinned the reverse order, which caused fc_app to
+    // drive throttle on the yaw channel against a real Betaflight FC.
+    const std::uint16_t expected[8] = {1100, 1200, 1400, 1300, 1500, 1600, 1700, 1800};
     for (std::size_t i = 0; i < 8; ++i) {
         const std::uint16_t got =
             static_cast<std::uint16_t>(rx[5 + 2 * i]) |

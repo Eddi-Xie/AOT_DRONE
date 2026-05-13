@@ -436,8 +436,32 @@ void MspRcSink::writeChannels(const BetaFlightCommand& cmd, double /*timestamp_s
         return;
     }
 
+    // MSPv1 channel-order asymmetry — read carefully before touching:
+    //
+    //   MSP_SET_RAW_RC (write, this function): wire order is AETR1234
+    //     under the default rcmap — Aileron (Roll), Elevator (Pitch),
+    //     Throttle, Rudder (Yaw), then four aux channels. Betaflight's
+    //     rxMspFrameReceive applies rcmap[] to remap from this wire
+    //     order to its internal channel layout. With the default rcmap
+    //     "AETR1234", wire position 2 maps to internal THROTTLE and
+    //     wire position 3 maps to internal YAW. We MUST send AETR
+    //     regardless of the FC's rcmap config — the rcmap reverses the
+    //     remap, so AETR on the wire is the contract.
+    //
+    //   MSP_RC (read, see poll_msp_rc_): reply order is RPYT1234 — the
+    //     FC's INTERNAL channel constants from rc.h (ROLL=0, PITCH=1,
+    //     YAW=2, THROTTLE=3, AUX1=4...). No rcmap is applied on the
+    //     way back. So a writeChannels-then-readback round-trip sees
+    //     fields at *different positions* on the two ends.
+    //
+    // Pre-fix this array sent {roll, pitch, yaw, throttle, ...} (RPYT).
+    // The bench MSP_RC log surfaced it: in LandSafely (throttle=1000,
+    // yaw=1500) the FC reported Throttle=1500, Yaw=1000 — fc_app was
+    // driving ~50% throttle on the yaw channel. With motors attached
+    // this would have been catastrophic. CI missed it because the
+    // unit test pinned the wrong order.
     const std::uint16_t channels[fc::msp::MSP_SET_RAW_RC_CHANNEL_COUNT] = {
-        cmd.roll, cmd.pitch, cmd.yaw, cmd.throttle, cmd.aux1, cmd.aux2, cmd.aux3, cmd.aux4,
+        cmd.roll, cmd.pitch, cmd.throttle, cmd.yaw, cmd.aux1, cmd.aux2, cmd.aux3, cmd.aux4,
     };
     auto frame = fc::msp::encode_set_raw_rc(channels);
 
