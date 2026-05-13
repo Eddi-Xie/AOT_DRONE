@@ -1,12 +1,16 @@
 # Hardware-in-the-Loop (HIL) Bench
 
-> **Status (2026-05-08):** S0.7 scaffold landed. `IRcSink` interface +
-> `NullSink` + `RecordingSink` + `FakeBetaflightSink` are implemented in
-> `src/fc/header/RcSink.h` / `src/fc/implementation/RcSink.cpp`; the
-> `scripts/dev/fake_betaflight_listener.py` Python harness asserts seq
-> monotonicity, observed Hz, and channel band. `replay_mission.py` is a
-> stub (offline CSV summary only — full CMD-replay is Sprint 1). The
-> real-hardware `MspRcSink` is the S0.8 task (next).
+> **Status (2026-05-13):** S0.8 landed and bench-verified. All four
+> `IRcSink` implementations are in tree: `NullSink` + `RecordingSink` +
+> `FakeBetaflightSink` (S0.7) + `MspRcSink` (S0.8 — real Betaflight
+> over USB MSPv1). First bench session caught a safety-critical
+> channel-mapping bug (RPYT-instead-of-AETR wire order) that would
+> have been catastrophic with motors attached; documented in the
+> writeChannels comment block and Section 3.4 below. The MSP_RC
+> read-back channel log is the operator's substitute for Configurator's
+> Receiver tab (USB-CDC port exclusivity prevents running both at
+> once). `replay_mission.py` is still a stub (offline CSV summary
+> only — full CMD-replay is Sprint 1).
 
 The HIL bench is the project's last line of defence between a software change
 and a real propellered airframe. ADR-004 mandates HIL acceptance before any
@@ -157,27 +161,209 @@ Errors are logged-but-tolerated: a transient `EAGAIN`/`ENOBUFS` increments
 an internal `frames_dropped_` counter but does not flip `ok()` to false,
 so the FC main loop keeps ticking.
 
-### 3.4 MspRcSink (S0.8 — not yet implemented)
+### 3.4 MspRcSink (S0.8)
 
-Real driver. Will open a serial device (`FC_RC_DEVICE`, default `/dev/cu.usbmodem*`
-on macOS / `/dev/ttyACM*` on Linux), run MSPv1 framing, send
-`MSP_SET_RAW_RC` (cmd 200) at 50 Hz with 16 bytes of `uint16_le` channels.
-For now `FC_RC_SINK=msp` errors out at startup pointing at S0.8.
+Real driver. Opens a USB-CDC serial node (`FC_RC_DEVICE`), runs MSPv1
+framing in `src/fc/implementation/MspFraming.cpp`, sends `MSP_SET_RAW_RC`
+(cmd 200) at 50 Hz with 16 bytes of `uint16_le` channels, and polls
+`MSP_RC` (cmd 105) at 5 Hz for arm-switch state plus a bench-
+verification channel log.
 
-Boot sequence:
+Env vars:
 
-1. Open device at 115200 8N1.
-2. Send `MSP_API_VERSION` (cmd 1). Refuse to leave Manual / LandSafely modes
-   until a valid reply arrives within 250 ms.
-3. Send `MSP_RC_TUNING` (cmd 111). Compare reply against the rate profile
-   recorded in `scripts/betaflight/aot_drone.diff`. On mismatch, log a
-   WARNING and require operator confirm before mode change.
-4. Begin 50 Hz `MSP_SET_RAW_RC` writeback. Track success ratio in
-   `msp_tx_ratio` (TEL field).
+- `FC_RC_SINK=msp` — selects this sink.
+- `FC_RC_DEVICE=<path>` — required. `/dev/cu.usbmodem*` on macOS,
+  `/dev/ttyACM*` on Linux. Validated up-front via `stat()` + `S_ISCHR`
+  so operator typos refuse cleanly with the offending path named.
+- `FC_RC_BAUD=<int>` — default `115200`. Allowlist enforced inside
+  `from_device`: 9600, 19200, 38400, 57600, 115200, 230400, 460800,
+  921600.
 
-Errors: short writes / `EAGAIN` retry once; persistent failure transitions
-the FC failsafe state machine to `StaleHard` (see `docs/development_plan.md`
-S0.4 for the failsafe state-machine definition).
+#### Channel-order asymmetry (read this before touching the code)
+
+MSPv1's channel-order convention is unfortunately ASYMMETRIC between
+write and read. Both sides are documented in `MspRcSink.cpp` but the
+TL;DR is:
+
+- **`MSP_SET_RAW_RC` (write)**: wire order is **AETR1234** under the
+  default Betaflight rcmap — Aileron (Roll), Elevator (Pitch),
+  Throttle, Rudder (Yaw), AUX1..4. Betaflight's `rxMspFrameReceive`
+  applies `rcmap[]` to remap from this wire order to its internal
+  channel layout. We MUST send AETR; rcmap reverses the remap.
+
+- **`MSP_RC` (read)**: reply order is **RPYT1234** — Betaflight's
+  internal channel constants (`ROLL=0, PITCH=1, YAW=2, THROTTLE=3,
+  AUX1=4...`) from `rc.h`. Betaflight does NOT reverse-apply rcmap
+  on the way back; `msp.c` just dumps `rcData[]` indexed by these
+  constants.
+
+So a writeChannels → readback round-trip sees `cmd.throttle` at wire
+position 2 on write but at reply position 3 on read. The bench
+verification log labels (`y=ch[2] t=ch[3]`) reflect the RPYT read
+order; the writeChannels array (`{roll, pitch, throttle, yaw, ...}`)
+reflects the AETR write order. They look swapped but are both
+correct — the asymmetry is in Betaflight's MSP layer.
+
+The first S0.8 bench run caught the original RPYT-write bug exactly
+because of this asymmetry: the FC reported throttle on the yaw
+channel via MSP_RC.
+
+#### Boot sequence
+
+1. `open(O_RDWR | O_NOCTTY | O_NONBLOCK)`, configure termios
+   (115200 8N1 raw, `VMIN=0`, `VTIME=0`, no flow control), `tcflush`
+   to drop boot chatter.
+2. Send `MSP_API_VERSION`. Wait up to 500 ms via `select()` (50 ms
+   polls). On no-reply, `boot_probe_failed_=true` → `ok()` flips
+   false → caller refuses fc_app startup.
+3. Send `MSP_RC_TUNING` (best-effort). Reply is logged for operator
+   review; on no-reply, `tuning_mismatch_=true` (gates Tracking /
+   Takeoff transitions identically to a boot-probe failure but does
+   not flip `ok()` — fc_app keeps running, just refuses mode upgrades).
+   Operator-confirm UI for the mismatch path lands with S0.14;
+   recovery in S0.8 is "stop fc_app, reseat USB / power-cycle FC,
+   restart".
+4. Begin 50 Hz `MSP_SET_RAW_RC` heartbeat in AETR wire order.
+   Surfaced as TEL field `msp_tx_ratio` (EWMA, α=0.05, init=1.0
+   optimistic).
+5. Every 10th tick (5 Hz), `poll_msp_rc_` drains pending bytes
+   non-blocking, latches `arm_switch_` from aux1 ≥1700 µs (force-
+   cleared after 1 s without a reply), emits the bench-verification
+   channel log, and sends a fresh MSP_RC query for the next poll.
+
+#### Error handling
+
+Short writes / `EAGAIN`/`EINTR` retry-once with progress vs no-progress
+separation (any successful write resets the budget; only consecutive
+no-progress attempts count toward the cap). Hard errors
+(`EPIPE`/`EBADF`/...) close the fd → `ok()` flips false. `main.cpp`
+maintains a parallel `sink_degraded_engaged` latch alongside the
+existing `failsafe_engaged` (CMD-stale) latch; both converge on
+`setControlMode(LandSafely)` but each tracks its own entry/exit so
+one recovery doesn't spuriously clear the other. SIGPIPE is ignored
+process-wide so a USB unplug can't terminate fc_app outright.
+
+Diagnostics: `MspRcSink` exposes `tx_ratio()`, `arm_switch()`,
+`tuning_mismatch()`, `parse_errors()`, `writes_attempted()`, and
+`writes_succeeded()` for tests + future TEL surfacing.
+
+#### Bench acceptance procedure (S0.8 merge gate)
+
+> **Run with motors physically detached.** ADR-004 mandates this for
+> any in-flight-behaviour change. Arming via USB is firmware-dependent
+> and may be refused — that pivot is documented in ADR-005 and arming
+> work moves to the Sprint 1 H2 UART path.
+
+**One-time Betaflight setup** (only if your FC's Receiver isn't
+already on MSP):
+
+1. With fc_app NOT running, open Betaflight Configurator, connect
+   to the FC.
+2. Configuration tab → Receiver → set "Serial Receiver Provider" to
+   **MSP RX input**.
+3. Save & Reboot. Disconnect Configurator (the USB-CDC port is
+   exclusive — fc_app can't share it with Configurator).
+
+Without this, the FC accepts `MSP_SET_RAW_RC` writes silently but
+ignores them, reporting whatever its physical RX is doing (typically
+failsafe values like ~885 µs throttle and 1500 µs centered sticks).
+
+**Per-bench flow:**
+
+1. **Hardware prep.** Remove motor connectors (or pull props if
+   motors are still attached). Visually confirm. Plug FC into the
+   laptop via USB.
+
+2. **Identify the device path.**
+
+   ```bash
+   ls /dev/cu.usbmodem* 2>/dev/null   # macOS
+   ls /dev/ttyACM* 2>/dev/null        # Linux
+   ```
+
+3. **Build + start fc_app.**
+
+   ```bash
+   cmake --build build -j
+   FC_RC_SINK=msp \
+   FC_RC_DEVICE=/dev/cu.usbmodem... \
+     ./build/src/fc/fc_app
+   ```
+
+   Confirm stderr shows the boot probe ok, tuning probe reply (or
+   tuning_mismatch=true), and "`RC sink=msp`". Within ~200 ms the
+   periodic MSP_RC log starts:
+
+   ```text
+   [FC] MspRcSink: MSP_RC=[r=1500 p=1500 y=1500 t=1000 a1=1000 a2=2000 a3=1000 a4=1000]
+   ```
+
+   This is the FC's view of the channels (RPYT order — see
+   asymmetry note above). With fc_app idle in LandSafely, expect
+   `r=p=y=1500`, `t=1000`, `a1=1000`, `a2=2000`, `a3=a4=1000`. If
+   `t` and `y` look swapped, fc_app's AETR write order is wrong —
+   regression of the S0.8 fix.
+
+4. **Start the webapp + backend** in separate terminals so CMD
+   frames can reach fc_app:
+
+   ```bash
+   python -m uvicorn src.backend.app:app    # backend
+   npm --prefix src/webapp run dev          # webapp
+   ```
+
+5. **Mode toggles.** From the webapp, switch through Manual /
+   LandSafely / Tracking / Takeoff modes. fc_app's stderr should
+   show `[FC] Applied CMD seq=... desired_mode=N` for each toggle
+   AND the MSP_RC log should reflect the mode's internal setpoints
+   (e.g. Takeoff drives throttle to the configured hover throttle).
+
+6. **Setpoint deflection** *(blocked on no setpoint UI in webapp —
+   open issue)*. Currently the webapp only sends `desired_mode`,
+   not explicit r/p/y/t setpoints. Until that ships, exercise the
+   deflection path via direct CMD injection (a Python script hitting
+   the backend's CMD WS endpoint with explicit `setpoints` fields).
+   See the open follow-up in Section 6.
+
+7. **Failsafe drop.** Stop the CMD stream (close the webapp tab or
+   kill the backend). Within `proto::CMD_TIMEOUT_S` (0.5 s) you
+   should see:
+
+   ```text
+   [FC] CMD link stale (age=...s > 0.5s); entering LandSafely failsafe
+   ```
+
+   and the MSP_RC log should reflect the LandSafely setpoints. The
+   drone must NOT arm.
+
+8. **Sink-degraded path.** Unplug USB while fc_app is running.
+   Within ~2 ticks (40 ms):
+
+   ```text
+   [FC] MspRcSink: write() failed (errno=...): ...; closing fd, ok() flipping to false
+   [FC] RC sink degraded (ok=false, tx_ratio=...); entering LandSafely failsafe
+   ```
+
+   The MSP_RC log stops because there's no fd to read from.
+
+9. **Arming via USB (informational, conditional ADR-005).** Re-plug,
+   restart fc_app, drive aux1 high via setpoint injection. Outcome
+   is firmware-dependent:
+   - **Betaflight arms:** great. Note the firmware version + RX
+     configuration in the PR description.
+   - **Betaflight refuses:** add `ADR-005` to `docs/decisions.md`
+     recording the symptom and deferring arming to the Sprint 1 H2
+     UART pivot. S0.8 still passes — channel tracking is the gate,
+     not arming.
+
+10. **Wrap.** SIGINT fc_app. The "[FC] fc_app stopped" line should
+    appear cleanly. Disconnect USB.
+
+If steps 1-5, 7, 8 all pass with the MSP_RC log showing correct
+channel values throughout, S0.8's foundational bench-acceptance gate
+is satisfied. Steps 6 and 9 are deferred to follow-up bench sessions
+once the missing tooling lands (setpoint injection script,
+ADR-005 outcome).
 
 ---
 
@@ -288,17 +474,36 @@ For first-flight clearance, see the Pre-First-Flight Gate in
 
 ## 6. Open follow-ups
 
-- **S0.8 — `MspRcSink`** (next): real Betaflight via USB MSP. Reuses the
-  same `IRcSink` interface — code path swap, not rewrite. Until landed,
-  `FC_RC_SINK=msp` errors out at startup with a "deferred to S0.8"
-  message.
-- **Sprint 1 H3 — real-FC bench acceptance**: run the recorded mission
-  scenarios above against a real FC over `MspRcSink`, motors detached,
-  Betaflight Configurator open. Add the latency probe (Sprint 1 P1.7)
-  to measure vision → MSP <100 ms p95.
+- **Bench step 6 — setpoint-injection script**: the webapp's
+  ControlPanel currently only sends `desired_mode`; no UI for explicit
+  roll/pitch/yaw/throttle setpoints. Bench step 6 (±20% stick
+  deflection) needs either webapp UI work OR a small Python script
+  that POSTs CMD frames with explicit `setpoints` fields to the
+  backend. Quick win for the next bench session.
+- **Bench step 9 — USB-arming verification**: outcome determines
+  whether `ADR-005` lands and arming work moves to Sprint 1 H2 UART
+  pivot. Run when convenient — non-blocking for S0.8 channel-tracking
+  acceptance.
+- **Sprint 1 H2 — UART pivot** (conditional on step 9): if USB arming
+  proves unreliable, swap `MspRcSink`'s transport from USB-CDC to a
+  hardware UART. The `IRcSink` interface keeps this a transport swap,
+  not a rewrite. Unblocks running Configurator and `MspRcSink`
+  simultaneously (UART for fc_app, USB for Configurator).
+- **Sprint 1 H2 — periodic MSP_RC_TUNING re-probe**: today
+  `tuning_mismatch_` is set-once and only clears on fc_app restart.
+  An in-flight re-probe + operator-confirm UI lands with the UART
+  pivot.
+- **Sprint 1 H3 — full mission bench acceptance**: run recorded
+  mission scenarios (S0.7's RecordingSink CSVs replayed via
+  `replay_mission.py`'s CMD-injection mode) against a real FC over
+  `MspRcSink`. Add the latency probe (Sprint 1 P1.7) to measure
+  vision → MSP <100 ms p95.
 - **Sprint 1 — `record_mission.py`** plus a CMD-injection mode for
   `replay_mission.py`: capture a (VIS, CMD) timeline as JSONL, replay
   it into the FC's TCP CMD listener, assert the resulting
   RecordingSink CSV matches the recorded baseline within tolerance.
 - **Sprint 1+ — CI integration**: run `replay_mission.py` against each
   PR and surface the CSV diff in PR comments.
+- **Future — atomic `std::cout` writes in fc_app**: pre-existing race
+  between main and the CommandServer worker thread can interleave log
+  lines mid-flush. Surfaced via CI flake during S0.8; deferred fix.
