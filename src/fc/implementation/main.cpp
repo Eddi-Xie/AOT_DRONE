@@ -413,6 +413,40 @@ int main() {
     fc::FlightController flight_controller;
     flight_controller.setControlMode(fc::ControlMode::LandSafely);
 
+    // FC_HOVER_THROTTLE: operator-calibrated hover throttle in µs (S0.9).
+    // Default 0 = "uncalibrated"; apply_control_mode_safely refuses
+    // Tracking/Takeoff transitions until this is set to a real value
+    // measured against the operator's specific airframe (battery, mass,
+    // props, ESC tune). Calibrated via scripts/dev/hover_calibration.py.
+    // Range: 0 (sentinel) or [DRONE_MIN, kAltHoldMaxThrottle] = 0 or
+    // [1000, 1800]; values outside this band are refused at parse.
+    const char* fc_hover_throttle_env = std::getenv("FC_HOVER_THROTTLE");
+    if (fc_hover_throttle_env != nullptr && *fc_hover_throttle_env != '\0') {
+        int hover_us = 0;
+        const char* const begin = fc_hover_throttle_env;
+        const char* const end = begin + std::strlen(begin);
+        auto [ptr, ec] = std::from_chars(begin, end, hover_us);
+        if (ec != std::errc{} || ptr != end) {
+            std::cerr << "[FC] Invalid FC_HOVER_THROTTLE='" << fc_hover_throttle_env
+                      << "', refusing to start (must be a base-10 integer with no trailing junk)\n";
+            command_server.stop();
+            return 1;
+        }
+        // Permitted values: 0 (explicit uncalibrate) OR a calibrated
+        // value in [DRONE_MIN, 1800]. Anything else is operator error.
+        if (hover_us != 0 && (hover_us < static_cast<int>(fc::rc::DRONE_MIN) || hover_us > 1800)) {
+            std::cerr << "[FC] FC_HOVER_THROTTLE=" << hover_us
+                      << " out of range; valid values are 0 (uncalibrated) or "
+                         "["
+                      << fc::rc::DRONE_MIN << ", 1800] (calibrated). Refusing to start.\n";
+            command_server.stop();
+            return 1;
+        }
+        flight_controller.setHoverThrottle(static_cast<std::uint16_t>(hover_us));
+        std::cout << "[FC] FC_HOVER_THROTTLE=" << hover_us
+                  << " (operator-calibrated); Tracking/Takeoff transitions allowed\n";
+    }
+
     std::unique_ptr<fc::IRcSink> rc_sink = make_rc_sink_from_env();
     if (rc_sink == nullptr) {
         command_server.stop();
