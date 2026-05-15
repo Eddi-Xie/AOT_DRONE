@@ -14,7 +14,22 @@ constexpr std::uint16_t kMinLandThrottle = fc::rc::DRONE_MIN + 30;
 constexpr double kMaxControlDtS = 0.2;
 constexpr double kPitchRangeUs = 300.0;
 constexpr double kYawRangeUs = 300.0;
-constexpr std::uint16_t kAltHoldMaxThrottle = 1500;
+// Alt-hold throttle constants (audit finding #2, S0.9).
+//
+// Pre-fix, a single `kAltHoldMaxThrottle = 1500` was used as both the
+// alt-hold neutral (stick centered) AND as the upper clamp on
+// hoverThrottle_ and the positive-delta ceiling in commandAltHoldDelta.
+// That conflation broke real-world hover: any FC whose true hover sits
+// above the stick centre (most do — quads, larger frames, heavier loads)
+// could never *climb* via alt-hold because positive delta clamped at the
+// neutral value. "Positive delta truly climbs" was the audit's phrasing.
+//
+// Post-fix: NEUTRAL is the stick-center pivot (where deltaNorm=0 maps
+// to no offset from hoverThrottle_); MAX is the hard upper ceiling that
+// hoverThrottle_ and the positive-delta excursion can reach. The 1800
+// ceiling preserves a 200µs safety margin below rc::DRONE_MAX=2000.
+constexpr std::uint16_t kAltHoldNeutralThrottle = 1500;
+constexpr std::uint16_t kAltHoldMaxThrottle = 1800;
 
 using fc::clamp_target_coord;
 using fc::clamp_unit;
@@ -81,6 +96,16 @@ void FlightController::setControlMode(ControlMode mode) {
 }
 
 void FlightController::setHoverThrottle(std::uint16_t hoverThrottle) {
+    // 0 is the "uncalibrated" sentinel (S0.9). Preserve it as-is so the
+    // operator can explicitly re-uncalibrate via setHoverThrottle(0) — and
+    // so that FC_HOVER_THROTTLE=0 doesn't silently clamp up to DRONE_MIN
+    // and slip past the apply_control_mode_safely gate. Any non-zero
+    // value is a real calibration target; clamp it to the safe operating
+    // range [DRONE_MIN, kAltHoldMaxThrottle].
+    if (hoverThrottle == 0) {
+        hoverThrottle_ = 0;
+        return;
+    }
     hoverThrottle_ = std::clamp(hoverThrottle, rc::DRONE_MIN, kAltHoldMaxThrottle);
 }
 
@@ -437,6 +462,12 @@ void FlightController::commandAltHoldDelta(double deltaNorm) {
     const double hover = static_cast<double>(hoverThrottle_);
     double cmd = hover;
 
+    // Asymmetric ranges: downward goes from hover to DRONE_MIN; upward
+    // goes from hover to kAltHoldMaxThrottle (the new wider ceiling per
+    // audit #2). Pre-S0.9 the upward range used the SAME constant as
+    // the alt-hold neutral (1500) — at any hoverThrottle_ ≥ 1500, climb
+    // had zero headroom even though the FC could safely accept up to
+    // 2000. Now positive delta can actually climb.
     if (deltaNorm < 0.0) {
         const double downRange = std::max(0.0, hover - static_cast<double>(rc::DRONE_MIN));
         cmd = hover + deltaNorm * downRange;

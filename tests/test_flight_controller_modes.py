@@ -151,25 +151,73 @@ int main() {
 def test_alt_hold_positive_delta_never_reduces_throttle_at_high_hover_setting(
     tmp_path: Path,
 ) -> None:
+    # Pre-S0.9 the alt-hold ceiling was 1500 µs — the SAME value used as
+    # both the alt-hold neutral and the upper clamp on setHoverThrottle.
+    # Positive delta at any hoverThrottle_ >= 1500 had zero headroom even
+    # though the FC could safely accept up to DRONE_MAX. The old version
+    # of this test PINNED that broken behavior with `neutral > 1500 ||
+    # climb > 1500` returning failure.
+    #
+    # Post-S0.9 (audit #2 fix): kAltHoldMaxThrottle = 1800 is the upper
+    # ceiling; kAltHoldNeutralThrottle = 1500 is the stick-center pivot.
+    # setHoverThrottle clamps to [DRONE_MIN, 1800] so calibrated hovers
+    # above 1500 are now accepted, and commandAltHoldDelta(1.0) actually
+    # climbs from there.
+    #
+    # New assertions:
+    #   (a) climb >= neutral — positive delta never reduces throttle
+    #   (b) climb <= DRONE_MAX — safety bound
+    #   (c) with a realistic 1100 µs hover, commandAltHoldDelta(1.0)
+    #       must reach the new ceiling (1800), proving the fix.
     source = r"""
 #include "FlightController.h"
 
+#include <cstdio>
+
 int main() {
-    fc::FlightController controller;
-    controller.setHoverThrottle(1800);
+    // Case 1: hover set above old broken ceiling (1500 → clamped to new
+    // ceiling 1800). climb must not reduce throttle.
+    {
+        fc::FlightController controller;
+        controller.setHoverThrottle(1800);
 
-    controller.commandAltHoldDelta(0.0);
-    const std::uint16_t neutral = controller.getCurrentCommand().throttle;
+        controller.commandAltHoldDelta(0.0);
+        const std::uint16_t neutral = controller.getCurrentCommand().throttle;
+        controller.commandAltHoldDelta(1.0);
+        const std::uint16_t climb = controller.getCurrentCommand().throttle;
 
-    controller.commandAltHoldDelta(1.0);
-    const std::uint16_t climb = controller.getCurrentCommand().throttle;
-
-    if (climb < neutral) {
-        return 1;
+        if (climb < neutral) {
+            std::fprintf(stderr, "case 1: climb=%u < neutral=%u\n",
+                         static_cast<unsigned>(climb), static_cast<unsigned>(neutral));
+            return 1;
+        }
+        if (climb > fc::rc::DRONE_MAX) {
+            std::fprintf(stderr, "case 1: climb=%u > DRONE_MAX=%u\n",
+                         static_cast<unsigned>(climb),
+                         static_cast<unsigned>(fc::rc::DRONE_MAX));
+            return 2;
+        }
     }
-    if (neutral > 1500 || climb > 1500) {
-        return 2;
+
+    // Case 2: realistic calibrated hover at 1100 µs. commandAltHoldDelta(1.0)
+    // should drive throttle to the new ceiling (1800). Pre-S0.9 this was
+    // clamped at 1500, leaving the FC unable to climb past the old
+    // neutral.
+    {
+        fc::FlightController controller;
+        controller.setHoverThrottle(1100);
+
+        controller.commandAltHoldDelta(1.0);
+        const std::uint16_t climb_from_1100 = controller.getCurrentCommand().throttle;
+
+        if (climb_from_1100 != 1800) {
+            std::fprintf(stderr,
+                         "case 2: expected climb from 1100 to reach 1800 (new ceiling), got %u\n",
+                         static_cast<unsigned>(climb_from_1100));
+            return 3;
+        }
     }
+
     return 0;
 }
 """
