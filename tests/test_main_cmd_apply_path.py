@@ -96,7 +96,12 @@ def _compile_and_run_cpp(tmp_path: Path, source_text: str) -> subprocess.Complet
 def test_manual_plus_arm_true_yields_hover_throttle(tmp_path: Path) -> None:
     # Reproduces main.cpp's CMD application order: setControlMode(Manual)
     # FIRST, setArm(true) SECOND. The test asserts the post-fix expected
-    # behaviour: throttle == hoverThrottle_ default (1100).
+    # behaviour: throttle == hoverThrottle_ after a Manual+arm:true sequence.
+    #
+    # S0.9 changed hoverThrottle_'s default from 1100 to 0 (uncalibrated
+    # sentinel). To keep this test focused on the ordering bug alone, the
+    # operator-calibrated value is set explicitly via setHoverThrottle
+    # before the Manual+arm sequence.
     source = r"""
 #include "FlightController.h"
 
@@ -105,6 +110,11 @@ def test_manual_plus_arm_true_yields_hover_throttle(tmp_path: Path) -> None:
 
 int main() {
     fc::FlightController controller;
+
+    // Set an explicit calibrated hover so this test isolates the ordering
+    // bug rather than tripping over the S0.9 uncalibrated default.
+    constexpr std::uint16_t kHoverThrottle = 1100;
+    controller.setHoverThrottle(kHoverThrottle);
 
     // Mimic main.cpp's per-CMD application order on a CMD that combines
     // desired_mode=Manual with arm:true. The bug is that setControlMode
@@ -117,11 +127,10 @@ int main() {
     // Post-fix expectation: Manual entry should produce hoverThrottle_
     // when armed by the same CMD. Today's behaviour: throttle stays at
     // rc::DRONE_MIN because is_armed() saw the pre-setArm aux1.
-    constexpr std::uint16_t kHoverThrottleDefault = 1100;
-    if (out.throttle != kHoverThrottleDefault) {
+    if (out.throttle != kHoverThrottle) {
         std::fprintf(stderr,
                      "Expected throttle=%u (hoverThrottle_), got %u (likely DRONE_MIN=%u)\n",
-                     kHoverThrottleDefault,
+                     kHoverThrottle,
                      static_cast<unsigned>(out.throttle),
                      static_cast<unsigned>(fc::rc::DRONE_MIN));
         return 1;

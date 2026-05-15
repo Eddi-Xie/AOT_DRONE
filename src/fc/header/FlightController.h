@@ -92,6 +92,12 @@ class FlightController {
     const TrackingConfig& getTrackingConfig() const { return trackingConfig_; }
 
     void setHoverThrottle(std::uint16_t hoverThrottle);
+    // Sentinel value 0 means "uncalibrated" — main.cpp's
+    // apply_control_mode_safely refuses Tracking / Takeoff transitions
+    // until the operator sets a real value via FC_HOVER_THROTTLE (or
+    // explicit setHoverThrottle call from a calibration script). See
+    // S0.9 / audit M-09.
+    std::uint16_t getHoverThrottle() const { return hoverThrottle_; }
 
     void updateTracking(const TrackingMessage& msg);
     void setDistances(double front_m, double back_m, double bottom_m);
@@ -142,7 +148,13 @@ class FlightController {
     bool takeoffInitialized_ = false;
     double takeoffTimer_s_ = 0.0;
 
-    std::uint16_t hoverThrottle_ = 1100;
+    // Default 0 is the "uncalibrated" sentinel. The audit (M-09) flagged
+    // the previous 1100 µs default as unsafe — fc_app would happily fly
+    // Takeoff / Tracking modes with an arbitrary hover value that no
+    // operator had actually confirmed. apply_control_mode_safely refuses
+    // those mode transitions while this is 0; the operator sets a real
+    // value via FC_HOVER_THROTTLE env var or scripts/dev/hover_calibration.py.
+    std::uint16_t hoverThrottle_ = 0;
     double searchYawRate_dps_ = 60.0;
 
     double takeoffSpoolTime_s_ = 0.8;

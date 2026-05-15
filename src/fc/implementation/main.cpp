@@ -161,6 +161,21 @@ bool apply_control_mode_safely(fc::ControlMode desired, fc::FlightController& fl
                          "confirm UI lands with S0.14)\n";
             return false;
         }
+        // Uncalibrated-hover gate (S0.9 / audit M-09): refuse any mode that
+        // depends on a known hover throttle until the operator has explicitly
+        // calibrated. hoverThrottle_=0 is the sentinel; set via
+        // FC_HOVER_THROTTLE env var or scripts/dev/hover_calibration.py.
+        // Manual is intentionally NOT gated here — it's operator-direct, and
+        // clampCommandChannels handles a 0 throttle by clamping up to
+        // DRONE_MIN, which is safer than refusing operator control entirely.
+        if (flight_controller.getHoverThrottle() == 0) {
+            std::cerr << "[FC] CMD seq=" << cmd_seq << " refused mode transition to "
+                      << static_cast<int>(desired)
+                      << "; hoverThrottle uncalibrated (set FC_HOVER_THROTTLE or run "
+                         "scripts/dev/hover_calibration.py; operator-confirm UI lands with "
+                         "S0.14)\n";
+            return false;
+        }
     }
     flight_controller.setControlMode(desired);
     return true;
