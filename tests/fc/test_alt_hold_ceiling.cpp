@@ -1,14 +1,19 @@
 // Pins the audit-#2 throttle ceiling fix (S0.9):
 //
-//   - kAltHoldNeutralThrottle = 1500 (alt-hold stick-center pivot)
-//   - kAltHoldMaxThrottle     = 1800 (upper ceiling for hover + climb)
+//   - kAltHoldMaxThrottle = 1800 (upper ceiling for hover + climb)
+//   - alt-hold neutral pivot = hoverThrottle_ itself (no separate
+//     constant — see FlightController.cpp's comment block; an earlier
+//     draft introduced a kAltHoldNeutralThrottle constant per the
+//     spec rename, then dropped it in round 2 as it was unreferenced).
 //
-// Pre-fix, a single 1500 µs constant served both roles. positive-delta
-// climb from any hoverThrottle_ ≥ 1500 had zero headroom even though
-// the FC's safe ceiling sits at DRONE_MAX (2000). The Python subprocess
-// test test_alt_hold_positive_delta_* covers the broader scenarios; this
-// file is the fast-ctest pinning of the exact API contracts so a future
-// refactor that reverts the ceiling trips a sub-second test.
+// Pre-fix, a single 1500 µs constant served as both the alt-hold
+// neutral AND the upper clamp on hoverThrottle_ AND the positive-delta
+// ceiling in commandAltHoldDelta. Positive-delta climb from any
+// hoverThrottle_ ≥ 1500 had zero headroom even though the FC's safe
+// ceiling sits at DRONE_MAX (2000). The Python subprocess test
+// test_alt_hold_positive_delta_* covers the broader scenarios; this
+// file is the fast-ctest pinning of the exact API contracts so a
+// future refactor that reverts the ceiling trips a sub-second test.
 
 #include "FlightController.h"
 #include "RcConstants.h"

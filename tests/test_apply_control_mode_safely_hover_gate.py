@@ -9,9 +9,9 @@ The gate sits at the CMD-apply boundary alongside the existing S0.8
 This test starts a real fc_app with no operator calibration applied,
 sends a framed CMD asking for Tracking, and asserts the gate-refusal
 log appears on stderr. The matching positive-control case
-(`FC_HOVER_THROTTLE=N` → accepted) lands with the env-var wiring in
-the next commit; until then there's no way to set a non-zero hover
-from the operator side.
+(`FC_HOVER_THROTTLE=N` → accepted, Tracking transition allowed) is
+covered by the companion env-var test
+`test_fc_hover_throttle_env.py::test_fc_hover_throttle_calibrated_unblocks_tracking_gate`.
 """
 
 from __future__ import annotations

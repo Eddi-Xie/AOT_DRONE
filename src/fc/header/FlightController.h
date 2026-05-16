@@ -7,6 +7,15 @@
 
 namespace fc {
 
+// Alt-hold upper ceiling (S0.9 audit #2). Used as:
+//   - the upper clamp on hoverThrottle_ in FlightController::setHoverThrottle
+//   - the positive-delta excursion ceiling in commandAltHoldDelta
+//   - the operator-facing upper bound on FC_HOVER_THROTTLE in main.cpp
+// 200 µs safety margin below rc::DRONE_MAX (2000). Lives in the header
+// so main.cpp's env-var validator stays in sync with FlightController's
+// clamp policy without having to duplicate the value.
+inline constexpr std::uint16_t kAltHoldMaxThrottle = 1800;
+
 enum class ControlMode : int {
     Manual = 0,
     Tracking = 1,

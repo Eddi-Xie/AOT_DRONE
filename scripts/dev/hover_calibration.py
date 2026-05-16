@@ -148,9 +148,12 @@ def _post_intent(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-            if resp.status not in (200, 201, 204):
-                return False, f"http {resp.status}"
+        # urllib.request.urlopen raises HTTPError on any 4xx/5xx and
+        # transparently follows 3xx redirects, so reaching this branch
+        # means the request succeeded (2xx). No explicit status check
+        # needed — the HTTPError handler below catches every interesting
+        # failure case.
+        with urllib.request.urlopen(req, timeout=timeout_s):
             return True, ""
     except urllib.error.HTTPError as exc:
         return False, f"http {exc.code}: {exc.reason}"

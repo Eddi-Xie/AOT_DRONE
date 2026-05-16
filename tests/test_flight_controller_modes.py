@@ -164,7 +164,9 @@ def test_alt_hold_positive_delta_never_reduces_throttle_at_high_hover_setting(
     # climb > 1500` returning failure.
     #
     # Post-S0.9 (audit #2 fix): kAltHoldMaxThrottle = 1800 is the upper
-    # ceiling; kAltHoldNeutralThrottle = 1500 is the stick-center pivot.
+    # ceiling, and the alt-hold neutral pivot is hoverThrottle_ itself
+    # (no separate kAltHoldNeutralThrottle constant — see
+    # FlightController.cpp's anonymous-namespace comment block for why).
     # setHoverThrottle clamps to [DRONE_MIN, 1800] so calibrated hovers
     # above 1500 are now accepted, and commandAltHoldDelta(1.0) actually
     # climbs from there.

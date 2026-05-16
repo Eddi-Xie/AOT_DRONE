@@ -282,11 +282,14 @@ def test_invalid_step_range_rejects_before_posting(tmp_path: Path) -> None:
     assert not (tmp_path / "wont_be_written.csv").exists()
 
 
-def test_classification_short_codes_accepted_in_unattended_no_op(tmp_path: Path) -> None:
+def test_unattended_mode_skips_operator_prompt(tmp_path: Path) -> None:
     # Sanity: in --unattended mode the prompt never fires, so all rows
     # land with 'n/a'. This guards against a future change that calls
     # input() even in unattended mode (which would block on a closed
-    # stdin in CI subprocess).
+    # stdin in CI subprocess). The actual short-code mapping (l/s/c/k)
+    # inside _prompt_classification is not exercised here — the
+    # interactive prompt is hard to drive through subprocess stdin and
+    # the mapping is straightforward enough to inspect by eye.
     with _IntentRecorder() as recorder:
         output = tmp_path / "session.csv"
         result = _run_script(

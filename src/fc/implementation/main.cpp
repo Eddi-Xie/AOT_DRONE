@@ -433,12 +433,17 @@ int main() {
             return 1;
         }
         // Permitted values: 0 (explicit uncalibrate) OR a calibrated
-        // value in [DRONE_MIN, 1800]. Anything else is operator error.
-        if (hover_us != 0 && (hover_us < static_cast<int>(fc::rc::DRONE_MIN) || hover_us > 1800)) {
+        // value in [DRONE_MIN, kAltHoldMaxThrottle]. Upper bound is
+        // sourced from FlightController.h so this validator stays in
+        // sync with setHoverThrottle's clamp policy automatically — a
+        // hardcoded number here would silently drift if the ceiling
+        // ever changes (review #5 callout in S0.9 Copilot pass).
+        if (hover_us != 0 && (hover_us < static_cast<int>(fc::rc::DRONE_MIN) ||
+                              hover_us > static_cast<int>(fc::kAltHoldMaxThrottle))) {
             std::cerr << "[FC] FC_HOVER_THROTTLE=" << hover_us
-                      << " out of range; valid values are 0 (uncalibrated) or "
-                         "["
-                      << fc::rc::DRONE_MIN << ", 1800] (calibrated). Refusing to start.\n";
+                      << " out of range; valid values are 0 (uncalibrated) or ["
+                      << fc::rc::DRONE_MIN << ", " << fc::kAltHoldMaxThrottle
+                      << "] (calibrated). Refusing to start.\n";
             command_server.stop();
             return 1;
         }

@@ -27,11 +27,10 @@ constexpr double kYawRangeUs = 300.0;
 // separate constant needed — the alt-hold stick centre IS the
 // calibrated hover). 200µs safety margin below DRONE_MAX=2000.
 //
-// (An earlier draft introduced kAltHoldNeutralThrottle = 1500 alongside
-// this constant per a spec-wording reading, but that constant was never
-// referenced — the stick-centre semantics already live in hoverThrottle_.
-// Removed in S0.9 round-2 review cleanup.)
-constexpr std::uint16_t kAltHoldMaxThrottle = 1800;
+// Lives in FlightController.h (since the env-var validator in main.cpp
+// needs the same value to gate FC_HOVER_THROTTLE input). Imported via
+// `using fc::kAltHoldMaxThrottle` below.
+using fc::kAltHoldMaxThrottle;
 
 using fc::clamp_target_coord;
 using fc::clamp_unit;
@@ -326,8 +325,20 @@ void FlightController::runFollowTargetLogic() {
     // per-tick body so a future in-flight setHoverThrottle(0) call can't
     // produce throttle=0 → DRONE_MIN snaps. The dev plan asked for
     // runFollowTargetLogic to refuse here explicitly.
+    //
+    // Unlike runTakeoffMode, this function has no deltaTime_s in scope,
+    // so we can't run the full LandSafely ramp inline. Instead we set
+    // explicit safe channels for this tick (neutral sticks, throttle at
+    // the land floor) — the next tick's updateTimeStep will dispatch to
+    // runLandSafelyMode properly. Setting channels inline keeps the FC's
+    // per-tick MSP output in a safe state for the one transition tick
+    // (review #6 in S0.9 Copilot pass — symmetric with runTakeoffMode).
     if (hoverThrottle_ == 0) {
         setControlMode(ControlMode::LandSafely);
+        currentCommand_.roll = rc::DRONE_MID;
+        currentCommand_.pitch = rc::DRONE_MID;
+        currentCommand_.yaw = rc::DRONE_MID;
+        currentCommand_.throttle = kMinLandThrottle;
         return;
     }
 
