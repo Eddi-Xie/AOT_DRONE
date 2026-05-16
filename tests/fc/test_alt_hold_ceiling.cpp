@@ -37,6 +37,16 @@ void test_set_hover_throttle_clamps_to_new_ceiling() {
     controller.setHoverThrottle(1100);
     TEST_ASSERT(controller.getHoverThrottle() == 1100);
 
+    // Exactly DRONE_MIN: accepted unchanged (boundary check —
+    // a future refactor that writes `> DRONE_MIN` instead of
+    // `>= DRONE_MIN` would silently break this).
+    controller.setHoverThrottle(fc::rc::DRONE_MIN);
+    TEST_ASSERT(controller.getHoverThrottle() == fc::rc::DRONE_MIN);
+
+    // DRONE_MIN - 1: clamped up to DRONE_MIN.
+    controller.setHoverThrottle(static_cast<std::uint16_t>(fc::rc::DRONE_MIN - 1));
+    TEST_ASSERT(controller.getHoverThrottle() == fc::rc::DRONE_MIN);
+
     // Explicitly re-uncalibrate (sentinel): preserved as 0.
     controller.setHoverThrottle(0);
     TEST_ASSERT(controller.getHoverThrottle() == 0);

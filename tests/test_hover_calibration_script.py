@@ -200,6 +200,62 @@ def test_observed_us_from_recording_sink_csv(tmp_path: Path) -> None:
     assert rows[0]["observed_us"] == "1234"
 
 
+def test_latest_csv_picked_when_multiple_sink_csvs_present(tmp_path: Path) -> None:
+    # Operator restart of fc_app leaves multiple sink_*.csv files in
+    # FC_RC_LOG_DIR. The script's _latest_csv must pick the
+    # most-recently-modified one — a regression that drops `reverse=True`
+    # or picks csvs[-1] would silently read a stale older file.
+    import os
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+
+    # Older session: throttle=999.
+    older = log_dir / "sink_20260514T010000Z.csv"
+    older.write_text(
+        "timestamp_s,roll,pitch,yaw,throttle,aux1,aux2,aux3,aux4\n"
+        "0.020000,1500,1500,1500,999,1000,2000,1000,1000\n"
+    )
+    # Force an older mtime so the sort is unambiguous regardless of
+    # filesystem timestamp granularity.
+    older_mtime = older.stat().st_mtime - 10.0
+    os.utime(older, (older_mtime, older_mtime))
+
+    # Newer session: throttle=1357 (what the script should pick up).
+    newer = log_dir / "sink_20260514T020000Z.csv"
+    newer.write_text(
+        "timestamp_s,roll,pitch,yaw,throttle,aux1,aux2,aux3,aux4\n"
+        "0.020000,1500,1500,1500,1357,1000,2000,1000,1000\n"
+    )
+
+    with _IntentRecorder() as recorder:
+        output = tmp_path / "session.csv"
+        result = _run_script(
+            "--backend-url",
+            recorder.base_url,
+            "--output",
+            str(output),
+            "--start",
+            "1100",
+            "--stop",
+            "1100",
+            "--step-us",
+            "10",
+            "--hold-s",
+            "0.01",
+            "--unattended",
+            "--log-dir",
+            str(log_dir),
+        )
+
+    assert result.returncode == 0, result.stderr
+    with output.open() as fh:
+        rows = list(csv.DictReader(fh))
+    assert len(rows) == 1
+    # The newer CSV's throttle (1357), not the older one's (999).
+    assert rows[0]["observed_us"] == "1357", rows[0]
+
+
 def test_invalid_step_range_rejects_before_posting(tmp_path: Path) -> None:
     # start > stop is operator error. The script should refuse without
     # firing any HTTP requests.

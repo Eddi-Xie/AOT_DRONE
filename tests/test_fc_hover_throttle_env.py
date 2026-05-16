@@ -125,6 +125,15 @@ def test_fc_hover_throttle_below_drone_min_refuses_to_start() -> None:
     assert "out of range" in err
 
 
+def test_fc_hover_throttle_negative_value_refuses_to_start() -> None:
+    # Negative microseconds are nonsensical. from_chars parses the sign
+    # then the range guard catches it via `< DRONE_MIN`.
+    rc, _out, err = _run_fc({"FC_HOVER_THROTTLE": "-100"})
+    assert rc == 1, f"expected exit 1, got {rc}; stderr={err!r}"
+    assert "FC_HOVER_THROTTLE=-100" in err
+    assert "out of range" in err
+
+
 def test_fc_hover_throttle_above_ceiling_refuses_to_start() -> None:
     # 1900 µs is above kAltHoldMaxThrottle (1800). Same up-front refusal
     # as the below-MIN case — operator likely meant 1800 (the ceiling)

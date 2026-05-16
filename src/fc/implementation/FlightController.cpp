@@ -14,21 +14,23 @@ constexpr std::uint16_t kMinLandThrottle = fc::rc::DRONE_MIN + 30;
 constexpr double kMaxControlDtS = 0.2;
 constexpr double kPitchRangeUs = 300.0;
 constexpr double kYawRangeUs = 300.0;
-// Alt-hold throttle constants (audit finding #2, S0.9).
+// Alt-hold ceiling (audit finding #2, S0.9). Pre-S0.9 this constant
+// was 1500 and served as BOTH the upper clamp on hoverThrottle_ AND
+// the positive-delta ceiling in commandAltHoldDelta. That meant any
+// FC whose true hover sat above the stick centre (most do — heavier
+// frames, larger props) had ZERO climb headroom: positive delta
+// clamped at 1500 even though the FC could safely accept up to
+// DRONE_MAX (2000). Audit's phrasing: "positive delta truly climbs".
 //
-// Pre-fix, a single `kAltHoldMaxThrottle = 1500` was used as both the
-// alt-hold neutral (stick centered) AND as the upper clamp on
-// hoverThrottle_ and the positive-delta ceiling in commandAltHoldDelta.
-// That conflation broke real-world hover: any FC whose true hover sits
-// above the stick centre (most do — quads, larger frames, heavier loads)
-// could never *climb* via alt-hold because positive delta clamped at the
-// neutral value. "Positive delta truly climbs" was the audit's phrasing.
+// Now: kAltHoldMaxThrottle = 1800 is the hard upper ceiling for both
+// uses; the deltaNorm=0 "neutral" pivot is hoverThrottle_ itself (no
+// separate constant needed — the alt-hold stick centre IS the
+// calibrated hover). 200µs safety margin below DRONE_MAX=2000.
 //
-// Post-fix: NEUTRAL is the stick-center pivot (where deltaNorm=0 maps
-// to no offset from hoverThrottle_); MAX is the hard upper ceiling that
-// hoverThrottle_ and the positive-delta excursion can reach. The 1800
-// ceiling preserves a 200µs safety margin below rc::DRONE_MAX=2000.
-constexpr std::uint16_t kAltHoldNeutralThrottle = 1500;
+// (An earlier draft introduced kAltHoldNeutralThrottle = 1500 alongside
+// this constant per a spec-wording reading, but that constant was never
+// referenced — the stick-centre semantics already live in hoverThrottle_.
+// Removed in S0.9 round-2 review cleanup.)
 constexpr std::uint16_t kAltHoldMaxThrottle = 1800;
 
 using fc::clamp_target_coord;
