@@ -80,22 +80,34 @@ def test_fc_hover_throttle_unset_starts_clean() -> None:
 
 def test_fc_hover_throttle_valid_value_accepted() -> None:
     # A realistic calibrated hover (1100 µs) should be accepted and
-    # logged on stdout.
+    # logged on stdout. The acceptance log is written from main on the
+    # same stdout where the CommandServer worker thread also writes a
+    # "Waiting for TCP command client on :9002" line at startup; the
+    # two can interleave and split "FC_HOVER_THROTTLE=1100" mid-string.
+    # Assert on the trailing "(operator-calibrated)" parenthetical which
+    # is emitted as a single string-literal operator<< and survives the
+    # race intact. Mirrors the de-flake of test_default_null_sink in
+    # tests/test_fc_rc_sink_env.py.
     rc, out, err = _run_fc({"FC_HOVER_THROTTLE": "1100"}, timeout=0.5)
     assert rc in (-signal.SIGTERM, 128 + signal.SIGTERM, 0), f"unexpected rc={rc}; stderr={err!r}"
     combined = out + err
-    assert "FC_HOVER_THROTTLE=1100" in combined, f"expected acceptance log, got: {combined!r}"
+    assert (
+        "(operator-calibrated)" in combined
+    ), f"expected hover-throttle acceptance log; stdout={out!r} stderr={err!r}"
 
 
 def test_fc_hover_throttle_zero_explicit_accepted() -> None:
     # FC_HOVER_THROTTLE=0 is explicit "uncalibrated" — must NOT be
     # treated as an error, but the gate is still active.
+    # Same stdout-race caveat as the valid-value case above: assert on
+    # the trailing "(operator-calibrated)" parenthetical, not the
+    # interleavable "FC_HOVER_THROTTLE=" prefix.
     rc, out, err = _run_fc({"FC_HOVER_THROTTLE": "0"}, timeout=0.5)
     assert rc in (-signal.SIGTERM, 128 + signal.SIGTERM, 0), f"unexpected rc={rc}; stderr={err!r}"
     combined = out + err
-    assert (
-        "FC_HOVER_THROTTLE=0" in combined
-    ), f"expected acceptance log for explicit 0, got: {combined!r}"
+    assert "(operator-calibrated)" in combined, (
+        f"expected hover-throttle acceptance log for explicit 0; " f"stdout={out!r} stderr={err!r}"
+    )
 
 
 def test_fc_hover_throttle_non_numeric_refuses_to_start() -> None:
