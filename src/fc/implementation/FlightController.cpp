@@ -250,8 +250,18 @@ void FlightController::runLandSafelyMode(double deltaTime_s) {
     if (!landSafelyInitialized_) {
         landSafelyInitialized_ = true;
         landTimer_s_ = 0.0;
-        landStartThrottle_ = std::max<std::uint16_t>(
-            kMinLandThrottle, std::min(currentCommand_.throttle, hoverThrottle_));
+        // Cap the ramp's starting point at hoverThrottle_ so an
+        // overshoot above hover (rare but possible mid-Tracking) can't
+        // ramp DOWN from above the calibrated safe steady state — that
+        // would extend the descent unnecessarily. When hover is the
+        // uncalibrated sentinel (0), the cap is meaningless and would
+        // collapse the start to kMinLandThrottle (= snap-cut, the exact
+        // failure mode S0.9 Copilot review round 3 #6 flagged); in that
+        // case ramp from currentCommand_.throttle directly.
+        const std::uint16_t start_candidate =
+            (hoverThrottle_ == 0) ? currentCommand_.throttle
+                                  : std::min(currentCommand_.throttle, hoverThrottle_);
+        landStartThrottle_ = std::max<std::uint16_t>(kMinLandThrottle, start_candidate);
     }
 
     if (!is_armed(currentCommand_)) {
@@ -288,7 +298,22 @@ void FlightController::runManualMode() {
     telemetryData_.tracking_state = TrackingState::Searching;
 }
 
-void FlightController::runTrackingMode() {
+void FlightController::runTrackingMode(double deltaTime_s) {
+    // Per-tick uncalibrated guard (S0.9 / audit M-09), symmetric with
+    // runTakeoffMode's guard at line ~170. apply_control_mode_safely
+    // refuses ENTRY to Tracking when hover==0; this catches the hypothetical
+    // mid-flight re-uncalibration where setHoverThrottle(0) is called after
+    // Tracking is already active. Dispatching into runLandSafelyMode(dt)
+    // gives the graduated 50 µs/s descent ramp instead of a per-tick snap
+    // (review #6 round 2 — previously this lived inside runFollowTargetLogic
+    // and snap-wrote channels inline; the dispatch into runLandSafelyMode
+    // here matches Takeoff's behaviour exactly).
+    if (hoverThrottle_ == 0) {
+        setControlMode(ControlMode::LandSafely);
+        runLandSafelyMode(deltaTime_s);
+        return;
+    }
+
     const bool stale = lastTrackingUpdateTime_s_ < 0.0 ||
                        (telemetryData_.timestamp_s - lastTrackingUpdateTime_s_) >
                            trackingConfig_.trackingTimeout_s;
@@ -320,27 +345,13 @@ void FlightController::runTrackingMode() {
 }
 
 void FlightController::runFollowTargetLogic() {
-    // Same defense-in-depth uncalibrated check as runTakeoffMode (S0.9 /
-    // audit M-09). apply_control_mode_safely gates entry; this gates the
-    // per-tick body so a future in-flight setHoverThrottle(0) call can't
-    // produce throttle=0 → DRONE_MIN snaps. The dev plan asked for
-    // runFollowTargetLogic to refuse here explicitly.
-    //
-    // Unlike runTakeoffMode, this function has no deltaTime_s in scope,
-    // so we can't run the full LandSafely ramp inline. Instead we set
-    // explicit safe channels for this tick (neutral sticks, throttle at
-    // the land floor) — the next tick's updateTimeStep will dispatch to
-    // runLandSafelyMode properly. Setting channels inline keeps the FC's
-    // per-tick MSP output in a safe state for the one transition tick
-    // (review #6 in S0.9 Copilot pass — symmetric with runTakeoffMode).
-    if (hoverThrottle_ == 0) {
-        setControlMode(ControlMode::LandSafely);
-        currentCommand_.roll = rc::DRONE_MID;
-        currentCommand_.pitch = rc::DRONE_MID;
-        currentCommand_.yaw = rc::DRONE_MID;
-        currentCommand_.throttle = kMinLandThrottle;
-        return;
-    }
+    // No uncalibrated guard here — runTrackingMode (the only caller path)
+    // checks hover==0 at its entry and dispatches to runLandSafelyMode
+    // with the full deltaTime_s ramp. Defense-in-depth lives one level up
+    // because it can run the graduated land ramp; an inline guard here
+    // would have to snap-write safe channels (no deltaTime_s in scope),
+    // which was the worse failure mode flagged by S0.9 Copilot review #6
+    // round 2.
 
     commandAltHoldDelta(0.0);
 
@@ -427,7 +438,7 @@ BetaFlightCommand FlightController::updateTimeStep(double deltaTime_s) {
         runManualMode();
         break;
     case ControlMode::Tracking:
-        runTrackingMode();
+        runTrackingMode(deltaTime_s);
         break;
     case ControlMode::LandSafely:
         runLandSafelyMode(deltaTime_s);
@@ -494,9 +505,9 @@ void FlightController::commandAltHoldDelta(double deltaNorm) {
     // Defense-in-depth: if the operator hasn't calibrated, refuse to
     // synthesize an alt-hold throttle. The CMD-apply gate prevents the
     // Tracking/Takeoff entry that would normally call this, and
-    // runTakeoffMode / runFollowTargetLogic short-circuit to LandSafely
-    // when hover=0 — but a direct caller (test stub, future feature)
-    // would otherwise get an unsafe upRange=(1800-0)=1800 computation.
+    // runTakeoffMode / runTrackingMode short-circuit to LandSafely when
+    // hover==0 — but a direct caller (test stub, future feature) would
+    // otherwise get an unsafe upRange=(1800-0)=1800 computation.
     // Leave the existing throttle untouched; LandSafely paths handle
     // descent on their own.
     if (hoverThrottle_ == 0) {

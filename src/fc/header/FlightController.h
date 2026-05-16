@@ -134,7 +134,7 @@ class FlightController {
 
     void runTakeoffMode(double deltaTime_s);
     void runLandSafelyMode(double deltaTime_s);
-    void runTrackingMode();
+    void runTrackingMode(double deltaTime_s);
     void runManualMode();
     void runHoverSearchState();
     void runHoverStillState(TrackingState stateForTelemetry);

@@ -52,6 +52,7 @@ import argparse
 import csv
 import datetime as dt
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -71,8 +72,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--api-token",
-        default=None,
-        help="Bearer token if BACKEND_API_TOKEN is set on the backend (default: none).",
+        default=os.environ.get("BACKEND_API_TOKEN"),
+        help="Bearer token if backend auth is enabled. Defaults to $BACKEND_API_TOKEN — "
+        "operators who already exported it for the backend process don't need to repeat it. "
+        "Pass explicitly to override.",
     )
     parser.add_argument(
         "--output",
@@ -256,6 +259,18 @@ def main() -> int:
             ok, note = _post_intent(
                 args.backend_url, throttle_us, args.api_token, args.request_timeout_s
             )
+            if not ok and note.startswith("http 401"):
+                # Auth failure on the very first request would otherwise
+                # produce a full CSV of n/a rows that looks superficially
+                # valid until the operator reads the notes column. Abort
+                # before walking the rest of the range so the operator can
+                # fix --api-token / BACKEND_API_TOKEN and re-run.
+                print(
+                    f"  step {throttle_us} µs — POST /api/intent returned 401 Unauthorized. "
+                    "Pass --api-token or export BACKEND_API_TOKEN before re-running.",
+                    file=sys.stderr,
+                )
+                return 3
             if not ok:
                 print(
                     f"  step {throttle_us} µs — POST /api/intent failed: {note}. Continuing.",

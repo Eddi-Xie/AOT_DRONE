@@ -232,6 +232,78 @@ int main() {
     assert run_result.returncode == 0, run_result.stderr + run_result.stdout
 
 
+def test_tracking_mode_uncalibrated_mid_flight_ramps_via_landsafely(tmp_path: Path) -> None:
+    # S0.9 Copilot review round 3 (#6): the per-tick uncalibrated guard
+    # used to live inside runFollowTargetLogic and snap-wrote throttle to
+    # kMinLandThrottle in a single tick. Now the guard lives at the top
+    # of runTrackingMode and dispatches to runLandSafelyMode(deltaTime_s),
+    # producing the proper graduated 50 µs/s descent ramp instead. This
+    # test calibrates, enters Tracking, then re-uncalibrates mid-flight
+    # to force the guard, and asserts the throttle decays gradually
+    # rather than snapping to the land floor in one tick.
+    source = r"""
+#include "FlightController.h"
+
+#include <cstdio>
+
+int main() {
+    fc::FlightController controller;
+    controller.setHoverThrottle(1500);
+    controller.setArm(true);
+    controller.setControlMode(fc::ControlMode::Tracking);
+
+    fc::TrackingMessage msg{};
+    msg.state = fc::TrackingState::Tracking;
+    msg.target_x = 0.0;
+    msg.target_y = 0.0;
+    msg.bound_w = 0.1;
+    msg.bound_h = 0.2;
+    msg.confidence = 1.0;
+    msg.timestamp_s = 1.0;
+    controller.updateTracking(msg);
+
+    // First tick: normal Tracking, throttle hovers near hoverThrottle_.
+    fc::BetaFlightCommand pre = controller.updateTimeStep(0.02);
+    if (pre.throttle < 1400) {
+        std::fprintf(stderr, "pre-tick throttle unexpectedly low: %u\n",
+                     static_cast<unsigned>(pre.throttle));
+        return 1;
+    }
+
+    // Force the mid-flight uncalibration scenario the guard defends.
+    controller.setHoverThrottle(0);
+
+    fc::BetaFlightCommand post = controller.updateTimeStep(0.02);
+    // Must have dispatched into LandSafely.
+    if (controller.getControlMode() != fc::ControlMode::LandSafely) {
+        std::fprintf(stderr, "expected LandSafely after uncalibration; got mode=%d\n",
+                     static_cast<int>(controller.getControlMode()));
+        return 2;
+    }
+    // Must NOT have snap-cut throttle to the land floor in one tick.
+    // (Pre-fix it would have written kMinLandThrottle = DRONE_MIN+30 = 1030.)
+    if (post.throttle <= 1100) {
+        std::fprintf(stderr, "throttle snapped instead of ramping: post=%u (pre=%u)\n",
+                     static_cast<unsigned>(post.throttle),
+                     static_cast<unsigned>(pre.throttle));
+        return 3;
+    }
+    // And the ramp must be downward — proves runLandSafelyMode actually
+    // ran the descent body, not just initialized the timer.
+    if (post.throttle > pre.throttle) {
+        std::fprintf(stderr, "expected throttle to decay: pre=%u post=%u\n",
+                     static_cast<unsigned>(pre.throttle),
+                     static_cast<unsigned>(post.throttle));
+        return 4;
+    }
+
+    return 0;
+}
+"""
+    run_result = _compile_and_run_cpp(tmp_path, source)
+    assert run_result.returncode == 0, run_result.stderr + run_result.stdout
+
+
 def test_entering_manual_mode_clears_stale_tracking_axes(tmp_path: Path) -> None:
     # Per-tick uncalibrated-hover guard (S0.9) routes Tracking → LandSafely
     # when hoverThrottle_ == 0. This test exercises the Tracking → Manual

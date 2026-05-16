@@ -35,9 +35,11 @@ SCRIPT = REPO_ROOT / "scripts" / "dev" / "hover_calibration.py"
 class _IntentRecorder:
     """ThreadingHTTPServer harness that records POST /api/intent bodies."""
 
-    def __init__(self, *, status: int = 200) -> None:
+    def __init__(self, *, status: int = 200, require_token: str | None = None) -> None:
         self._status = status
+        self._require_token = require_token
         self.posts: list[dict] = []
+        self.authorizations: list[str | None] = []
         self._lock = threading.Lock()
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
@@ -52,6 +54,18 @@ class _IntentRecorder:
                     self.send_response(404)
                     self.end_headers()
                     return
+                auth = self.headers.get("Authorization")
+                if (
+                    recorder._require_token is not None
+                    and auth != f"Bearer {recorder._require_token}"
+                ):
+                    self.send_response(401)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(b'{"detail":"unauthorized"}')
+                    with recorder._lock:
+                        recorder.authorizations.append(auth)
+                    return
                 length = int(self.headers.get("Content-Length", "0"))
                 body = self.rfile.read(length)
                 try:
@@ -60,6 +74,7 @@ class _IntentRecorder:
                     parsed = {"_raw": body.hex()}
                 with recorder._lock:
                     recorder.posts.append(parsed)
+                    recorder.authorizations.append(auth)
                 self.send_response(recorder._status)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
@@ -86,13 +101,18 @@ class _IntentRecorder:
         return f"http://127.0.0.1:{self.port}"
 
 
-def _run_script(*extra_args: str, timeout_s: float = 10.0) -> subprocess.CompletedProcess:
+def _run_script(
+    *extra_args: str,
+    timeout_s: float = 10.0,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
     return subprocess.run(
         [sys.executable, str(SCRIPT), *extra_args],
         capture_output=True,
         text=True,
         check=False,
         timeout=timeout_s,
+        env=env,
     )
 
 
@@ -313,6 +333,80 @@ def test_unattended_mode_skips_operator_prompt(tmp_path: Path) -> None:
         rows = list(csv.DictReader(fh))
     assert len(rows) == 1
     assert rows[0]["classification"] == "n/a"
+
+
+def test_backend_api_token_env_var_picked_up_by_default(tmp_path: Path) -> None:
+    # If the operator already exported BACKEND_API_TOKEN for the backend
+    # process, the script should pick it up without --api-token. Otherwise
+    # every POST would silently 401 and the operator gets a 71-row CSV of
+    # failed requests masquerading as a successful sweep (Copilot review
+    # round 3, comment #1).
+    import os as _os
+
+    expected_token = "operator-test-token"
+    with _IntentRecorder(require_token=expected_token) as recorder:
+        output = tmp_path / "session.csv"
+        env = _os.environ.copy()
+        env["BACKEND_API_TOKEN"] = expected_token
+        result = _run_script(
+            "--backend-url",
+            recorder.base_url,
+            "--output",
+            str(output),
+            "--start",
+            "1000",
+            "--stop",
+            "1010",
+            "--step-us",
+            "10",
+            "--hold-s",
+            "0.01",
+            "--unattended",
+            env=env,
+        )
+
+    assert result.returncode == 0, result.stderr
+    assert len(recorder.posts) == 2
+    # Every recorded request carried the bearer header from the env var.
+    assert recorder.authorizations == [f"Bearer {expected_token}"] * 2
+
+
+def test_unauthorized_response_aborts_before_walking_full_range(tmp_path: Path) -> None:
+    # 401 on the first step means auth is misconfigured — every subsequent
+    # step will also 401. Continuing produces a misleading "complete" CSV
+    # full of n/a rows. Script must abort fast so the operator notices
+    # immediately (Copilot review round 3, comment #1).
+    import os as _os
+
+    with _IntentRecorder(require_token="some-other-token") as recorder:
+        output = tmp_path / "session.csv"
+        env = _os.environ.copy()
+        env.pop("BACKEND_API_TOKEN", None)
+        result = _run_script(
+            "--backend-url",
+            recorder.base_url,
+            "--output",
+            str(output),
+            "--start",
+            "1000",
+            "--stop",
+            "1100",
+            "--step-us",
+            "10",
+            "--hold-s",
+            "0.01",
+            "--unattended",
+            env=env,
+        )
+
+    # Non-zero exit, only one POST attempted before abort.
+    assert result.returncode == 3, result.stderr
+    assert "401 Unauthorized" in result.stderr
+    assert len(recorder.authorizations) == 1, recorder.authorizations
+    # CSV exists but is just the header — no data rows written before abort.
+    with output.open() as fh:
+        rows = list(csv.DictReader(fh))
+    assert rows == []
 
 
 @pytest.mark.skipif(not SCRIPT.exists(), reason="hover_calibration.py missing")
