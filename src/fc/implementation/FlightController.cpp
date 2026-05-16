@@ -157,6 +157,21 @@ bool FlightController::isTargetValid() const {
 }
 
 void FlightController::runTakeoffMode(double deltaTime_s) {
+    // Defense-in-depth uncalibrated check (S0.9 / audit M-09). The
+    // apply_control_mode_safely gate refuses ENTRY to Takeoff when
+    // hoverThrottle_ == 0, but a future code path that flips hover back
+    // to 0 in-flight (operator-initiated re-calibration, or a refactor
+    // that allows mid-flight setHoverThrottle calls) would otherwise
+    // write throttle = hoverThrottle_ = 0 at line ~191. clampCommandChannels
+    // would rescue to DRONE_MIN, but the FC's behaviour would still be
+    // a sudden full-throttle-cut. Per-tick refusal is what the dev plan
+    // (S0.9 line 298) actually called for.
+    if (hoverThrottle_ == 0) {
+        setControlMode(ControlMode::LandSafely);
+        runLandSafelyMode(deltaTime_s);
+        return;
+    }
+
     if (!takeoffInitialized_) {
         takeoffInitialized_ = true;
         takeoffTimer_s_ = 0.0;
@@ -304,6 +319,16 @@ void FlightController::runTrackingMode() {
 }
 
 void FlightController::runFollowTargetLogic() {
+    // Same defense-in-depth uncalibrated check as runTakeoffMode (S0.9 /
+    // audit M-09). apply_control_mode_safely gates entry; this gates the
+    // per-tick body so a future in-flight setHoverThrottle(0) call can't
+    // produce throttle=0 → DRONE_MIN snaps. The dev plan asked for
+    // runFollowTargetLogic to refuse here explicitly.
+    if (hoverThrottle_ == 0) {
+        setControlMode(ControlMode::LandSafely);
+        return;
+    }
+
     commandAltHoldDelta(0.0);
 
     const bool stale = lastTrackingUpdateTime_s_ < 0.0 ||
@@ -453,6 +478,18 @@ void FlightController::commandYawRate(double yawRateDps) {
 }
 
 void FlightController::commandAltHoldDelta(double deltaNorm) {
+    // Defense-in-depth: if the operator hasn't calibrated, refuse to
+    // synthesize an alt-hold throttle. The CMD-apply gate prevents the
+    // Tracking/Takeoff entry that would normally call this, and
+    // runTakeoffMode / runFollowTargetLogic short-circuit to LandSafely
+    // when hover=0 — but a direct caller (test stub, future feature)
+    // would otherwise get an unsafe upRange=(1800-0)=1800 computation.
+    // Leave the existing throttle untouched; LandSafely paths handle
+    // descent on their own.
+    if (hoverThrottle_ == 0) {
+        return;
+    }
+
     if (!std::isfinite(deltaNorm)) {
         deltaNorm = 0.0;
     }

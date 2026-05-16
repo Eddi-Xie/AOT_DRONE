@@ -41,11 +41,16 @@ def _compile_and_run_cpp(tmp_path: Path, source_text: str) -> subprocess.Complet
 
 
 def test_takeoff_auto_transitions_to_tracking(tmp_path: Path) -> None:
+    # S0.9 added per-tick uncalibrated-hover guards to runTakeoffMode and
+    # runFollowTargetLogic; without an explicit setHoverThrottle the
+    # default-0 sentinel routes both to LandSafely. This test exercises
+    # the calibrated-hover happy path, so set a realistic value first.
     source = r"""
 #include "FlightController.h"
 
 int main() {
     fc::FlightController controller;
+    controller.setHoverThrottle(1100);
     controller.setControlMode(fc::ControlMode::Takeoff);
 
     for (int i = 0; i < 400; ++i) {
@@ -226,11 +231,15 @@ int main() {
 
 
 def test_entering_manual_mode_clears_stale_tracking_axes(tmp_path: Path) -> None:
+    # Per-tick uncalibrated-hover guard (S0.9) routes Tracking → LandSafely
+    # when hoverThrottle_ == 0. This test exercises the Tracking → Manual
+    # transition path; set a realistic hover so Tracking actually runs.
     source = r"""
 #include "FlightController.h"
 
 int main() {
     fc::FlightController controller;
+    controller.setHoverThrottle(1100);
     controller.setArm(true);
     controller.setControlMode(fc::ControlMode::Tracking);
 

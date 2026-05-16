@@ -95,6 +95,13 @@ def _terminate_and_capture(proc: subprocess.Popen) -> tuple[int, str, str]:
     return proc.returncode, out, err
 
 
+# Time to wait after sending a CMD frame before SIGTERM. fc_app's main
+# loop ticks at 50 Hz (~20ms), so 800ms covers ~40 ticks — comfortable
+# even on a contended GitHub Actions runner. Previously this was 200ms,
+# which review #7 flagged as flake-risk under noisy CI.
+_CMD_APPLY_WAIT_S = 0.8
+
+
 def test_uncalibrated_hover_refuses_tracking_mode() -> None:
     # FC_HOVER_THROTTLE unset → default 0 → gate must refuse Tracking.
     proc = _start_fc_app({})
@@ -103,8 +110,9 @@ def test_uncalibrated_hover_refuses_tracking_mode() -> None:
         frame = _build_cmd_frame(seq=1, desired_mode=DESIRED_MODE_TRACKING)
         with socket.create_connection(("127.0.0.1", FC_CMD_PORT), timeout=0.5) as sock:
             sock.sendall(frame)
-        # Give fc_app a tick or two to apply the CMD and log the refusal.
-        time.sleep(0.2)
+        # Give fc_app enough ticks to apply the CMD and log the refusal.
+        # See _CMD_APPLY_WAIT_S comment for the timing rationale.
+        time.sleep(_CMD_APPLY_WAIT_S)
     finally:
         rc, _out, err = _terminate_and_capture(proc)
 

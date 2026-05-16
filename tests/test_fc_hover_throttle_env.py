@@ -172,7 +172,10 @@ def test_fc_hover_throttle_calibrated_unblocks_tracking_gate() -> None:
         frame = struct.pack(">I", len(body)) + body
         with socket.create_connection(("127.0.0.1", 9002), timeout=0.5) as sock:
             sock.sendall(frame)
-        time.sleep(0.2)
+        # 0.8s covers ~40 fc_app ticks; comfortable margin over noisy
+        # CI runners that can stall a single tick by 100+ ms. See
+        # review #7 in the S0.9 round-1 fixes for the rationale.
+        time.sleep(0.8)
     finally:
         proc.send_signal(signal.SIGTERM)
         try:
