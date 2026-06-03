@@ -163,17 +163,19 @@ bool apply_control_mode_safely(fc::ControlMode desired, fc::FlightController& fl
         }
         // Uncalibrated-hover gate (S0.9 / audit M-09): refuse any mode that
         // depends on a known hover throttle until the operator has explicitly
-        // calibrated. hoverThrottle_=0 is the sentinel; set via
-        // FC_HOVER_THROTTLE env var or scripts/dev/hover_calibration.py.
+        // calibrated. hoverThrottle_=0 is the sentinel; cleared only by
+        // restarting fc_app with FC_HOVER_THROTTLE set. hover_calibration.py
+        // helps the operator FIND the right value to pass to FC_HOVER_THROTTLE
+        // (it does not itself reach into fc_app's state).
         // Manual is intentionally NOT gated here — it's operator-direct, and
         // clampCommandChannels handles a 0 throttle by clamping up to
         // DRONE_MIN, which is safer than refusing operator control entirely.
         if (flight_controller.getHoverThrottle() == 0) {
             std::cerr << "[FC] CMD seq=" << cmd_seq << " refused mode transition to "
                       << static_cast<int>(desired)
-                      << "; hoverThrottle uncalibrated (set FC_HOVER_THROTTLE or run "
-                         "scripts/dev/hover_calibration.py; operator-confirm UI lands with "
-                         "S0.14)\n";
+                      << "; hoverThrottle uncalibrated (set FC_HOVER_THROTTLE and restart "
+                         "fc_app; scripts/dev/hover_calibration.py can be used to determine "
+                         "the right value; operator-confirm UI lands with S0.14)\n";
             return false;
         }
     }
@@ -448,8 +450,18 @@ int main() {
             return 1;
         }
         flight_controller.setHoverThrottle(static_cast<std::uint16_t>(hover_us));
-        std::cout << "[FC] FC_HOVER_THROTTLE=" << hover_us
-                  << " (operator-calibrated); Tracking/Takeoff transitions allowed\n";
+        if (hover_us == 0) {
+            // FC_HOVER_THROTTLE=0 is the explicit uncalibrated sentinel —
+            // accepted (no error), but the apply_control_mode_safely gate
+            // still refuses Tracking/Takeoff. Logging "transitions allowed"
+            // here would mislead the operator into expecting Tracking to
+            // work (Copilot round 4 #2). Be explicit instead.
+            std::cout << "[FC] FC_HOVER_THROTTLE=0 (explicit uncalibrated); "
+                         "Tracking/Takeoff transitions will be refused\n";
+        } else {
+            std::cout << "[FC] FC_HOVER_THROTTLE=" << hover_us
+                      << " (operator-calibrated); Tracking/Takeoff transitions allowed\n";
+        }
     }
 
     std::unique_ptr<fc::IRcSink> rc_sink = make_rc_sink_from_env();

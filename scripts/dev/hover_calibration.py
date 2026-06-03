@@ -255,57 +255,79 @@ def main() -> int:
         writer = csv.writer(fh)
         writer.writerow(["step_idx", "requested_us", "observed_us", "classification", "notes"])
 
-        for idx, throttle_us in enumerate(steps):
-            ok, note = _post_intent(
-                args.backend_url, throttle_us, args.api_token, args.request_timeout_s
-            )
-            if not ok and note.startswith("http 401"):
-                # Auth failure on the very first request would otherwise
-                # produce a full CSV of n/a rows that looks superficially
-                # valid until the operator reads the notes column. Abort
-                # before walking the rest of the range so the operator can
-                # fix --api-token / BACKEND_API_TOKEN and re-run.
-                print(
-                    f"  step {throttle_us} µs — POST /api/intent returned 401 Unauthorized. "
-                    "Pass --api-token or export BACKEND_API_TOKEN before re-running.",
-                    file=sys.stderr,
+        # Ctrl-C handling: if the operator aborts mid-sweep, the last
+        # throttle intent stays in effect until something else overrides
+        # it. Even with motors detached (per ADR-004) that's surprising;
+        # if someone reuses the script outside the intended bench setup
+        # it could be unsafe. Wrap the loop so KeyboardInterrupt POSTs a
+        # final throttle=0 (→ DRONE_MIN after backend clamp) before exit
+        # (Copilot round 4 #4).
+        try:
+            for idx, throttle_us in enumerate(steps):
+                ok, note = _post_intent(
+                    args.backend_url, throttle_us, args.api_token, args.request_timeout_s
                 )
-                return 3
-            if not ok:
-                print(
-                    f"  step {throttle_us} µs — POST /api/intent failed: {note}. Continuing.",
-                    file=sys.stderr,
-                )
+                if not ok and note.startswith("http 401"):
+                    # Auth failure on the very first request would otherwise
+                    # produce a full CSV of n/a rows that looks superficially
+                    # valid until the operator reads the notes column. Abort
+                    # before walking the rest of the range so the operator can
+                    # fix --api-token / BACKEND_API_TOKEN and re-run.
+                    print(
+                        f"  step {throttle_us} µs — POST /api/intent returned 401 "
+                        "Unauthorized. Pass --api-token or export BACKEND_API_TOKEN "
+                        "before re-running.",
+                        file=sys.stderr,
+                    )
+                    return 3
+                if not ok:
+                    print(
+                        f"  step {throttle_us} µs — POST /api/intent failed: {note}. "
+                        "Continuing.",
+                        file=sys.stderr,
+                    )
 
-            time.sleep(args.hold_s)
+                time.sleep(args.hold_s)
 
-            classification = "n/a"
-            if not args.unattended:
-                try:
-                    classification = _prompt_classification(throttle_us)
-                except EOFError:
-                    # Pipe closed (e.g. unattended subprocess) — fall back.
-                    classification = "n/a"
+                classification = "n/a"
+                if not args.unattended:
+                    try:
+                        classification = _prompt_classification(throttle_us)
+                    except EOFError:
+                        # Pipe closed (e.g. unattended subprocess) — fall back.
+                        classification = "n/a"
 
-            observed: object = "n/a"
-            if args.log_dir is not None:
-                csv_path = _latest_csv(args.log_dir)
-                if csv_path is None:
-                    note = note or "no RecordingSink CSV in --log-dir"
-                else:
-                    parsed = _read_observed_throttle(csv_path)
-                    if parsed is None:
-                        note = note or f"could not read throttle from {csv_path.name}"
+                observed: object = "n/a"
+                if args.log_dir is not None:
+                    csv_path = _latest_csv(args.log_dir)
+                    if csv_path is None:
+                        note = note or "no RecordingSink CSV in --log-dir"
                     else:
-                        observed = parsed
+                        parsed = _read_observed_throttle(csv_path)
+                        if parsed is None:
+                            note = note or f"could not read throttle from {csv_path.name}"
+                        else:
+                            observed = parsed
 
-            writer.writerow([idx, throttle_us, observed, classification, note])
-            fh.flush()
+                writer.writerow([idx, throttle_us, observed, classification, note])
+                fh.flush()
 
+                print(
+                    f"  step {idx + 1}/{len(steps)}: requested={throttle_us} µs "
+                    f"observed={observed} classification={classification}"
+                )
+        except KeyboardInterrupt:
             print(
-                f"  step {idx + 1}/{len(steps)}: requested={throttle_us} µs "
-                f"observed={observed} classification={classification}"
+                "\nhover_calibration: Ctrl-C received — POSTing safety reset "
+                "(throttle=0) before exit.",
+                file=sys.stderr,
             )
+            # Best-effort: a single retry-free POST. If the backend is the
+            # reason the operator is aborting, this won't reach the FC —
+            # but the failsafe path on the FC side (CMD-stale latch in
+            # main.cpp) will eventually engage on its own.
+            _post_intent(args.backend_url, 0, args.api_token, args.request_timeout_s)
+            return 130
 
     print(f"hover_calibration: wrote {len(steps)} steps to {output_path}.")
     return 0

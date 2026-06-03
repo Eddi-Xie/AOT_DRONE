@@ -98,15 +98,26 @@ def test_fc_hover_throttle_valid_value_accepted() -> None:
 
 def test_fc_hover_throttle_zero_explicit_accepted() -> None:
     # FC_HOVER_THROTTLE=0 is explicit "uncalibrated" — must NOT be
-    # treated as an error, but the gate is still active.
-    # Same stdout-race caveat as the valid-value case above: assert on
-    # the trailing "(operator-calibrated)" parenthetical, not the
-    # interleavable "FC_HOVER_THROTTLE=" prefix.
+    # treated as an error, but the gate is still active and the operator-
+    # facing log must say so. Pre-Copilot-round-4 this case shared the
+    # "(operator-calibrated); Tracking/Takeoff transitions allowed" log
+    # with valid values, which was misleading. The log is now case-split.
+    # Same stdout-race caveat as the valid-value case: assert on a stable
+    # single-literal substring, not the interleavable "FC_HOVER_THROTTLE="
+    # prefix.
     rc, out, err = _run_fc({"FC_HOVER_THROTTLE": "0"}, timeout=0.5)
     assert rc in (-signal.SIGTERM, 128 + signal.SIGTERM, 0), f"unexpected rc={rc}; stderr={err!r}"
     combined = out + err
-    assert "(operator-calibrated)" in combined, (
-        f"expected hover-throttle acceptance log for explicit 0; " f"stdout={out!r} stderr={err!r}"
+    assert "(explicit uncalibrated)" in combined, (
+        f"expected explicit-uncalibrated hover-throttle log for 0; "
+        f"stdout={out!r} stderr={err!r}"
+    )
+    # And the misleading "allowed" wording from the valid-value branch
+    # must NOT appear — that would re-introduce the operator-confusion
+    # this fix addresses.
+    assert "(operator-calibrated)" not in combined, (
+        f"explicit 0 must not share the 'operator-calibrated' log with "
+        f"valid values; stdout={out!r} stderr={err!r}"
     )
 
 

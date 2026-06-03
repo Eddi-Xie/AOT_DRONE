@@ -20,9 +20,11 @@ from __future__ import annotations
 
 import csv
 import json
+import signal
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -407,6 +409,71 @@ def test_unauthorized_response_aborts_before_walking_full_range(tmp_path: Path) 
     with output.open() as fh:
         rows = list(csv.DictReader(fh))
     assert rows == []
+
+
+def test_keyboard_interrupt_posts_safety_reset_before_exit(tmp_path: Path) -> None:
+    # Operator Ctrl-Cs mid-sweep — without a handler, the last requested
+    # throttle stays in effect on the FC until something else overrides
+    # it. Script must POST throttle=0 (→ DRONE_MIN after backend clamp)
+    # to leave the FC in a known-safe state on exit (Copilot review
+    # round 4, comment #4).
+    with _IntentRecorder() as recorder:
+        output = tmp_path / "session.csv"
+        # --hold-s=2.0 so the script is reliably mid-sleep when we SIGINT.
+        # --stop=2000 so the run can't possibly complete before our signal.
+        proc = subprocess.Popen(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--backend-url",
+                recorder.base_url,
+                "--output",
+                str(output),
+                "--start",
+                "1000",
+                "--stop",
+                "2000",
+                "--step-us",
+                "10",
+                "--hold-s",
+                "2.0",
+                "--unattended",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        # Wait for the first POST so we know the loop has started.
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if len(recorder.posts) >= 1:
+                break
+            time.sleep(0.05)
+        assert len(recorder.posts) >= 1, "script never made first POST"
+        before_sigint = len(recorder.posts)
+
+        proc.send_signal(signal.SIGINT)
+        try:
+            _out, err = proc.communicate(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            _out, err = proc.communicate()
+            raise
+
+    assert proc.returncode == 130, f"expected SIGINT exit code 130; got {proc.returncode!r}"
+    assert "safety reset" in err, f"expected safety-reset log on stderr; got {err!r}"
+    # At least one additional POST landed after SIGINT — the safety
+    # reset. It must carry throttle=0.
+    assert len(recorder.posts) > before_sigint, (
+        f"no safety-reset POST after SIGINT; "
+        f"posts before={before_sigint} after={len(recorder.posts)}"
+    )
+    final = recorder.posts[-1]
+    assert final["setpoints"] == {
+        "throttle": 0.0
+    }, f"final POST not the throttle=0 safety reset; got {final!r}"
+    assert final["desired_mode"] == 0  # Manual
 
 
 @pytest.mark.skipif(not SCRIPT.exists(), reason="hover_calibration.py missing")
