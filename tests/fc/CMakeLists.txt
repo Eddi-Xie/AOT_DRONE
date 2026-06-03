@@ -36,3 +36,7 @@ add_test(NAME test_msp_framing COMMAND test_msp_framing)
 add_executable(test_msp_rc_sink test_msp_rc_sink.cpp)
 target_link_libraries(test_msp_rc_sink PRIVATE fc)
 add_test(NAME test_msp_rc_sink COMMAND test_msp_rc_sink)
+
+add_executable(test_alt_hold_ceiling test_alt_hold_ceiling.cpp)
+target_link_libraries(test_alt_hold_ceiling PRIVATE fc)
+add_test(NAME test_alt_hold_ceiling COMMAND test_alt_hold_ceiling)

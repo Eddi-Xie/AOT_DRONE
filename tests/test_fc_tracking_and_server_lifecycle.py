@@ -230,6 +230,9 @@ int main() {
     }
 
     fc::FlightController controller;
+    // S0.9 per-tick uncalibrated-hover guard routes Tracking → LandSafely
+    // when hoverThrottle_ == 0. Calibrate explicitly for this test.
+    controller.setHoverThrottle(1100);
     controller.setControlMode(fc::ControlMode::Tracking);
 
     fc::TrackingMessage tracking{};
