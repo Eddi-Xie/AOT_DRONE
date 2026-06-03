@@ -414,9 +414,11 @@ def test_unauthorized_response_aborts_before_walking_full_range(tmp_path: Path) 
 def test_keyboard_interrupt_posts_safety_reset_before_exit(tmp_path: Path) -> None:
     # Operator Ctrl-Cs mid-sweep — without a handler, the last requested
     # throttle stays in effect on the FC until something else overrides
-    # it. Script must POST throttle=0 (→ DRONE_MIN after backend clamp)
-    # to leave the FC in a known-safe state on exit (Copilot review
-    # round 4, comment #4).
+    # it. Script must POST throttle=0 to leave the FC in a known-safe
+    # state on exit. The 0→DRONE_MIN clamp lands in fc_app, not the
+    # backend — RcMath::throttle_to_pwm treats 0 as a normalized
+    # fraction (= 0%) and emits DRONE_MIN. (Copilot review round 4 #4,
+    # wording fix round 5 #2.)
     with _IntentRecorder() as recorder:
         output = tmp_path / "session.csv"
         # --hold-s=2.0 so the script is reliably mid-sleep when we SIGINT.

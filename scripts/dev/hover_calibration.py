@@ -260,8 +260,10 @@ def main() -> int:
         # it. Even with motors detached (per ADR-004) that's surprising;
         # if someone reuses the script outside the intended bench setup
         # it could be unsafe. Wrap the loop so KeyboardInterrupt POSTs a
-        # final throttle=0 (→ DRONE_MIN after backend clamp) before exit
-        # (Copilot round 4 #4).
+        # final throttle=0 before exit. The backend's /api/intent path
+        # doesn't clamp setpoints — the 0→DRONE_MIN safety lands in
+        # fc_app (RcMath::throttle_to_pwm + clampCommandChannels in
+        # FlightController.cpp). (Copilot round 4 #4, wording fix round 5 #1.)
         try:
             for idx, throttle_us in enumerate(steps):
                 ok, note = _post_intent(
