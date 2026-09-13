@@ -790,36 +790,29 @@ export default function App(): JSX.Element {
         </div>
       </header>
 
-      <ErrorBoundary sectionLabel="Warnings">
-        <Warnings
-          derivedAlerts={stableDerivedAlerts}
-          warnings={state.warnings}
-          onClear={onClearWarnings}
-        />
-      </ErrorBoundary>
-
       <main className="main-grid">
-        <ControlPanel
-          selectedMode={state.selectedMode}
-          actualMode={actualMode}
-          armed={state.armed}
-          pending={state.intentPending}
-          trackingBlockedReason={trackingBlockedReason}
-          feedbackKind={state.intentFeedbackKind}
-          feedbackMessage={state.intentFeedbackMessage}
-          onSelectMode={onSelectMode}
-          onToggleArm={onToggleArm}
-        />
-
-        <div className="right-column">
-          <ErrorBoundary sectionLabel="Video">
-            <VideoPanel
-              latestTel={state.latestTel}
-              latestVis={state.latestVis}
-              overlaySource={overlaySource}
-              videoUrl={backendConfig.videoUrl}
+        <div className="side-column">
+          <div className="side-column__stack">
+            <ControlPanel
+              selectedMode={state.selectedMode}
+              actualMode={actualMode}
+              armed={state.armed}
+              pending={state.intentPending}
+              trackingBlockedReason={trackingBlockedReason}
+              feedbackKind={state.intentFeedbackKind}
+              feedbackMessage={state.intentFeedbackMessage}
+              onSelectMode={onSelectMode}
+              onToggleArm={onToggleArm}
             />
-          </ErrorBoundary>
+
+            <ErrorBoundary sectionLabel="Warnings">
+              <Warnings
+                derivedAlerts={stableDerivedAlerts}
+                warnings={state.warnings}
+                onClear={onClearWarnings}
+              />
+            </ErrorBoundary>
+          </div>
 
           <ErrorBoundary sectionLabel="Tracking Summary">
             <TrackingSummary
@@ -848,6 +841,17 @@ export default function App(): JSX.Element {
               linkEnvelopeTimestampS={state.linkEnvelopeTimestampS}
               projectedVisAgeS={projectedVisAgeS}
               visFreshThresholdS={visFreshThresholdS}
+            />
+          </ErrorBoundary>
+        </div>
+
+        <div className="video-column">
+          <ErrorBoundary sectionLabel="Video">
+            <VideoPanel
+              latestTel={state.latestTel}
+              latestVis={state.latestVis}
+              overlaySource={overlaySource}
+              videoUrl={backendConfig.videoUrl}
             />
           </ErrorBoundary>
         </div>

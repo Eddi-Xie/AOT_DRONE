@@ -25,32 +25,46 @@ p {
   margin: 0;
 }
 
+/* Single-viewport layout: the shell pins to the window height so the whole
+   dashboard fits on screen without page scrolling (demo recordings capture
+   every panel); columns scroll internally if a small window runs out of room. */
 .app-shell {
-  margin: 0 auto;
-  max-width: 1300px;
-  padding: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  height: 100vh;
+  overflow: hidden;
+  padding: 0.7rem 0.9rem;
 }
 
 .top-bar {
-  align-items: flex-start;
+  align-items: center;
   background: rgba(255, 255, 255, 0.85);
   border: 1px solid #c6d5e3;
-  border-radius: 14px;
+  border-radius: 12px;
   display: flex;
+  flex-shrink: 0;
   gap: 1rem;
   justify-content: space-between;
-  margin-bottom: 1rem;
-  padding: 1rem 1.1rem;
+  padding: 0.5rem 0.9rem;
+}
+
+.top-bar > div:first-child {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.1rem 0.9rem;
 }
 
 .top-bar h1 {
   color: #17344b;
-  font-size: 1.4rem;
+  font-size: 1.05rem;
+  white-space: nowrap;
 }
 
 .top-bar__subtitle {
   color: #4b6373;
-  font-size: 0.84rem;
+  font-size: 0.74rem;
 }
 
 .top-bar__badges {
@@ -112,26 +126,61 @@ p {
 
 .main-grid {
   display: grid;
-  gap: 1rem;
-  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+  flex: 1;
+  gap: 0.7rem;
+  grid-template-columns: minmax(500px, 600px) minmax(0, 1fr);
+  min-height: 0;
 }
 
-.right-column {
+/* Controls, warnings, tracking and telemetry share a two-column sidebar on
+   the left; the video column gets the rest of the screen. */
+.side-column {
+  align-content: start;
   display: grid;
-  gap: 1rem;
+  gap: 0.7rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+}
+
+.side-column__stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  min-width: 0;
+}
+
+.side-column .telemetry-panel {
+  grid-column: 1 / -1;
+}
+
+.video-column {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* The stage stays 16:9 (width-driven) so the bbox overlay math keeps mapping
+   1:1 onto the frame; the height guard only bites on short windows. */
+.video-column .video-stage {
+  max-height: calc(100vh - 220px);
 }
 
 .panel {
   background: rgba(255, 255, 255, 0.9);
   border: 1px solid #c6d5e3;
-  border-radius: 14px;
-  padding: 1rem;
+  border-radius: 12px;
+  flex-shrink: 0;
+  padding: 0.75rem 0.85rem;
 }
 
 .panel h2 {
   color: #17344b;
-  font-size: 1.02rem;
-  margin-bottom: 0.7rem;
+  font-size: 0.92rem;
+  margin-bottom: 0.45rem;
 }
 
 .controls-panel {
@@ -159,7 +208,7 @@ p {
   color: #18384d;
   cursor: pointer;
   font-weight: 700;
-  min-height: 42px;
+  min-height: 36px;
   padding: 0.45rem 0.6rem;
   transition: transform 120ms ease, background-color 120ms ease;
 }
@@ -229,7 +278,7 @@ p {
 }
 
 .warnings-panel {
-  margin-bottom: 1rem;
+  margin-bottom: 0;
 }
 
 .warnings-panel__header {
@@ -415,7 +464,7 @@ p {
   align-items: center;
   display: flex;
   justify-content: space-between;
-  margin-bottom: 0.5rem;
+  margin-bottom: 0.3rem;
 }
 
 .tracking-summary-panel__label {
@@ -454,17 +503,17 @@ p {
   display: flex;
   gap: 0.7rem;
   justify-content: space-between;
-  margin-top: 0.65rem;
-  padding-top: 0.65rem;
+  margin-top: 0.45rem;
+  padding-top: 0.45rem;
 }
 
 .tracking-summary-panel__charts {
   border-top: 1px solid #e1ebf3;
   display: grid;
-  gap: 0.65rem;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-  margin-top: 0.65rem;
-  padding-top: 0.65rem;
+  gap: 0.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  margin-top: 0.45rem;
+  padding-top: 0.45rem;
 }
 
 .tracking-summary-panel__chart-title {
@@ -478,7 +527,7 @@ p {
   border: 1px solid #d9e4ee;
   border-radius: 8px;
   display: block;
-  height: 52px;
+  height: 38px;
   width: 100%;
 }
 
@@ -498,8 +547,8 @@ p {
 .aim-indicator {
   background: #f8fbfe;
   border-radius: 10px;
-  height: 72px;
-  width: 72px;
+  height: 58px;
+  width: 58px;
 }
 
 .aim-indicator__frame {
@@ -521,15 +570,16 @@ p {
 }
 
 .telemetry-panel .card-grid {
+  align-items: start;
   display: grid;
-  gap: 0.75rem;
-  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 0.6rem;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
 }
 
 .status-card {
   border: 1px solid #d4e0ea;
   border-radius: 12px;
-  padding: 0.7rem 0.75rem;
+  padding: 0.5rem 0.6rem;
 }
 
 .status-card--ok {
@@ -552,12 +602,12 @@ p {
 }
 
 .status-card__header {
-  margin-bottom: 0.5rem;
+  margin-bottom: 0.35rem;
 }
 
 .status-card__header h3 {
   color: #17344b;
-  font-size: 0.92rem;
+  font-size: 0.84rem;
 }
 
 .status-card__header p {
@@ -567,7 +617,7 @@ p {
 
 .status-card__rows {
   display: grid;
-  gap: 0.32rem;
+  gap: 0.2rem;
 }
 
 .status-card__row {
@@ -581,7 +631,7 @@ p {
 .status-card__row dt,
 .status-card__row dd {
   color: #244053;
-  font-size: 0.8rem;
+  font-size: 0.74rem;
   margin: 0;
 }
 
@@ -595,6 +645,12 @@ p {
 }
 
 @media (max-width: 980px) {
+  /* Small windows fall back to normal page scrolling. */
+  .app-shell {
+    height: auto;
+    overflow: visible;
+  }
+
   .main-grid {
     grid-template-columns: 1fr;
   }
