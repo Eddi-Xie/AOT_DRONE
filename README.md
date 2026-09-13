@@ -246,7 +246,7 @@ Still open in Sprint 0 (P1):
 
 **Sprint 1 is when the motors come back on.** Physical build-out (mounts, harness, power), real-FC HIL acceptance on a test stand, and the calibration CSV put to use for real lift-off classification. Once the pre-flight gate is green, a seven-step progression runs from tethered hover up to the first flight under this stack.
 
-Branches: `dev` is the integration branch. `main` is intentionally stale.
+Branches: day-to-day work merges into `dev`; `main` tracks it at stable points.
 
 ---
 
