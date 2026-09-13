@@ -762,7 +762,7 @@ export default function App(): JSX.Element {
   return (
     <div className="app-shell">
       <header className="top-bar">
-        <div>
+        <div className="top-bar__title">
           <h1>AOT Drone Control Panel</h1>
           <p className="top-bar__subtitle">Backend HTTP: {backendConfig.httpUrl}</p>
           <p className="top-bar__subtitle">Backend WS: {backendConfig.wsUrl}</p>
@@ -790,36 +790,29 @@ export default function App(): JSX.Element {
         </div>
       </header>
 
-      <ErrorBoundary sectionLabel="Warnings">
-        <Warnings
-          derivedAlerts={stableDerivedAlerts}
-          warnings={state.warnings}
-          onClear={onClearWarnings}
-        />
-      </ErrorBoundary>
-
       <main className="main-grid">
-        <ControlPanel
-          selectedMode={state.selectedMode}
-          actualMode={actualMode}
-          armed={state.armed}
-          pending={state.intentPending}
-          trackingBlockedReason={trackingBlockedReason}
-          feedbackKind={state.intentFeedbackKind}
-          feedbackMessage={state.intentFeedbackMessage}
-          onSelectMode={onSelectMode}
-          onToggleArm={onToggleArm}
-        />
-
-        <div className="right-column">
-          <ErrorBoundary sectionLabel="Video">
-            <VideoPanel
-              latestTel={state.latestTel}
-              latestVis={state.latestVis}
-              overlaySource={overlaySource}
-              videoUrl={backendConfig.videoUrl}
+        <div className="side-column">
+          <div className="side-column__stack">
+            <ControlPanel
+              selectedMode={state.selectedMode}
+              actualMode={actualMode}
+              armed={state.armed}
+              pending={state.intentPending}
+              trackingBlockedReason={trackingBlockedReason}
+              feedbackKind={state.intentFeedbackKind}
+              feedbackMessage={state.intentFeedbackMessage}
+              onSelectMode={onSelectMode}
+              onToggleArm={onToggleArm}
             />
-          </ErrorBoundary>
+
+            <ErrorBoundary sectionLabel="Warnings">
+              <Warnings
+                derivedAlerts={stableDerivedAlerts}
+                warnings={state.warnings}
+                onClear={onClearWarnings}
+              />
+            </ErrorBoundary>
+          </div>
 
           <ErrorBoundary sectionLabel="Tracking Summary">
             <TrackingSummary
@@ -838,16 +831,31 @@ export default function App(): JSX.Element {
             />
           </ErrorBoundary>
 
-          <ErrorBoundary sectionLabel="Telemetry">
-            <TelemetryPanel
-              linkStatus={state.linkStatus}
+          {/* The wrapper carries the full-width grid placement so it survives
+              ErrorBoundary swapping the panel for its fallback section. */}
+          <div className="side-column__wide">
+            <ErrorBoundary sectionLabel="Telemetry">
+              <TelemetryPanel
+                linkStatus={state.linkStatus}
+                latestTel={state.latestTel}
+                latestVis={state.latestVis}
+                nowMs={nowMs}
+                linkUpdatedAtMs={state.linkUpdatedAtMs}
+                linkEnvelopeTimestampS={state.linkEnvelopeTimestampS}
+                projectedVisAgeS={projectedVisAgeS}
+                visFreshThresholdS={visFreshThresholdS}
+              />
+            </ErrorBoundary>
+          </div>
+        </div>
+
+        <div className="video-column">
+          <ErrorBoundary sectionLabel="Video">
+            <VideoPanel
               latestTel={state.latestTel}
               latestVis={state.latestVis}
-              nowMs={nowMs}
-              linkUpdatedAtMs={state.linkUpdatedAtMs}
-              linkEnvelopeTimestampS={state.linkEnvelopeTimestampS}
-              projectedVisAgeS={projectedVisAgeS}
-              visFreshThresholdS={visFreshThresholdS}
+              overlaySource={overlaySource}
+              videoUrl={backendConfig.videoUrl}
             />
           </ErrorBoundary>
         </div>
