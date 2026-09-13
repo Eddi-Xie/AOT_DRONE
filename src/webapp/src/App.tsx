@@ -762,7 +762,7 @@ export default function App(): JSX.Element {
   return (
     <div className="app-shell">
       <header className="top-bar">
-        <div>
+        <div className="top-bar__title">
           <h1>AOT Drone Control Panel</h1>
           <p className="top-bar__subtitle">Backend HTTP: {backendConfig.httpUrl}</p>
           <p className="top-bar__subtitle">Backend WS: {backendConfig.wsUrl}</p>
@@ -831,18 +831,22 @@ export default function App(): JSX.Element {
             />
           </ErrorBoundary>
 
-          <ErrorBoundary sectionLabel="Telemetry">
-            <TelemetryPanel
-              linkStatus={state.linkStatus}
-              latestTel={state.latestTel}
-              latestVis={state.latestVis}
-              nowMs={nowMs}
-              linkUpdatedAtMs={state.linkUpdatedAtMs}
-              linkEnvelopeTimestampS={state.linkEnvelopeTimestampS}
-              projectedVisAgeS={projectedVisAgeS}
-              visFreshThresholdS={visFreshThresholdS}
-            />
-          </ErrorBoundary>
+          {/* The wrapper carries the full-width grid placement so it survives
+              ErrorBoundary swapping the panel for its fallback section. */}
+          <div className="side-column__wide">
+            <ErrorBoundary sectionLabel="Telemetry">
+              <TelemetryPanel
+                linkStatus={state.linkStatus}
+                latestTel={state.latestTel}
+                latestVis={state.latestVis}
+                nowMs={nowMs}
+                linkUpdatedAtMs={state.linkUpdatedAtMs}
+                linkEnvelopeTimestampS={state.linkEnvelopeTimestampS}
+                projectedVisAgeS={projectedVisAgeS}
+                visFreshThresholdS={visFreshThresholdS}
+              />
+            </ErrorBoundary>
+          </div>
         </div>
 
         <div className="video-column">

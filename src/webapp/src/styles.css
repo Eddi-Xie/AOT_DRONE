@@ -1,4 +1,5 @@
 :root {
+  --layout-gap: 0.7rem;
   color: #12222e;
   font-family: "Space Grotesk", "Avenir Next", "Segoe UI", sans-serif;
   line-height: 1.4;
@@ -31,10 +32,10 @@ p {
 .app-shell {
   display: flex;
   flex-direction: column;
-  gap: 0.7rem;
+  gap: var(--layout-gap);
   height: 100vh;
   overflow: hidden;
-  padding: 0.7rem 0.9rem;
+  padding: var(--layout-gap) 0.9rem;
 }
 
 .top-bar {
@@ -49,7 +50,7 @@ p {
   padding: 0.5rem 0.9rem;
 }
 
-.top-bar > div:first-child {
+.top-bar__title {
   align-items: baseline;
   display: flex;
   flex-wrap: wrap;
@@ -127,8 +128,8 @@ p {
 .main-grid {
   display: grid;
   flex: 1;
-  gap: 0.7rem;
-  grid-template-columns: minmax(500px, 600px) minmax(0, 1fr);
+  gap: var(--layout-gap);
+  grid-template-columns: minmax(460px, 560px) minmax(0, 1fr);
   min-height: 0;
 }
 
@@ -137,43 +138,55 @@ p {
 .side-column {
   align-content: start;
   display: grid;
-  gap: 0.7rem;
+  gap: var(--layout-gap);
   grid-template-columns: repeat(2, minmax(0, 1fr));
   min-height: 0;
-  min-width: 0;
   overflow-y: auto;
+}
+
+.side-column > * {
+  min-width: 0;
 }
 
 .side-column__stack {
   display: flex;
   flex-direction: column;
-  gap: 0.7rem;
-  min-width: 0;
+  gap: var(--layout-gap);
 }
 
-.side-column .telemetry-panel {
+.side-column__wide {
   grid-column: 1 / -1;
 }
 
 .video-column {
   display: flex;
   flex-direction: column;
-  justify-content: center;
   min-height: 0;
   min-width: 0;
+  overflow-y: auto;
 }
 
-/* The stage stays 16:9 (width-driven) so the bbox overlay math keeps mapping
-   1:1 onto the frame; the height guard only bites on short windows. */
+/* margin-block: auto centers the panel but collapses to zero when the column
+   overflows, so short windows scroll to the content instead of clipping it. */
+.video-column .video-panel {
+  margin-block: auto;
+}
+
+/* The stage must stay exactly 16:9 or the bbox overlay draws onto cropped
+   pixels, so the size cap constrains WIDTH only and aspect-ratio derives the
+   height. This trades a little dead space on short or ultrawide windows for
+   a frame that is never cropped or misaligned (240px approximates header +
+   gaps + panel chrome, and errs on the safe side; 1600px bounds the overlay
+   canvas backing store on big monitors). */
 .video-column .video-stage {
-  max-height: calc(100vh - 220px);
+  margin-inline: auto;
+  width: min(100%, 1600px, calc((100vh - 240px) * 16 / 9));
 }
 
 .panel {
   background: rgba(255, 255, 255, 0.9);
   border: 1px solid #c6d5e3;
   border-radius: 12px;
-  flex-shrink: 0;
   padding: 0.75rem 0.85rem;
 }
 
@@ -181,10 +194,6 @@ p {
   color: #17344b;
   font-size: 0.92rem;
   margin-bottom: 0.45rem;
-}
-
-.controls-panel {
-  align-self: start;
 }
 
 .controls-panel__meta {
@@ -275,10 +284,6 @@ p {
 
 .controls-panel__feedback--error {
   color: #8a281a;
-}
-
-.warnings-panel {
-  margin-bottom: 0;
 }
 
 .warnings-panel__header {
@@ -522,12 +527,14 @@ p {
   margin-bottom: 0.28rem;
 }
 
+/* Height matches the component's internal viewBox (Sparkline.tsx) so the
+   preserveAspectRatio="none" scaling stays 1:1 and strokes don't distort. */
 .sparkline {
   background: #f8fbfe;
   border: 1px solid #d9e4ee;
   border-radius: 8px;
   display: block;
-  height: 38px;
+  height: 52px;
   width: 100%;
 }
 
@@ -644,8 +651,9 @@ p {
   font-size: 0.8rem;
 }
 
-@media (max-width: 980px) {
-  /* Small windows fall back to normal page scrolling. */
+@media (max-width: 1200px) {
+  /* Narrow windows fall back to normal page scrolling; below this width the
+     sidebar would otherwise squeeze the video into a sliver. */
   .app-shell {
     height: auto;
     overflow: visible;
@@ -655,6 +663,14 @@ p {
     grid-template-columns: 1fr;
   }
 
+  .side-column {
+    grid-template-columns: 1fr;
+  }
+
+  .video-column .video-stage {
+    width: 100%;
+  }
+
   .top-bar {
     align-items: stretch;
     flex-direction: column;
@@ -662,6 +678,19 @@ p {
 
   .top-bar__badges {
     align-items: flex-start;
+  }
+}
+
+@media (max-height: 520px) {
+  /* The pinned shell keys off width, but clipping risk is vertical: short
+     windows (half-height snaps) also fall back to page scrolling. */
+  .app-shell {
+    height: auto;
+    overflow: visible;
+  }
+
+  .video-column .video-stage {
+    width: 100%;
   }
 }
 
