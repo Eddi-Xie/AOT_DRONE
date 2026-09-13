@@ -1,6 +1,8 @@
 # Build artifacts
 build/
 cmake-build-*/
+# CTest drops its output here when ctest runs from the repo root
+Testing/
 *.o
 *.obj
 *.exe
