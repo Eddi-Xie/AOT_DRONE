@@ -263,17 +263,17 @@ Priority within Sprint 0: P0 → P1 → P2. P0 must be green by May 11; P1 shoul
 
 > **Why this is in Sprint 0:** Eddi has the FC + USB cable. We can implement and unit-test against a real Betaflight FC (motors *removed*) by observing channel values in Betaflight Configurator's "Receiver" tab. Arming via USB is firmware-dependent and may not work — that pivot is Sprint 1.
 
-- [ ] Implement `src/fc/implementation/MspRcSink.cpp` against `IRcSink`.
-- [ ] **MSPv1 framing**: `$M<` + size + cmd + payload + xor checksum.
-- [ ] **Cmd 200 (`MSP_SET_RAW_RC`)** — payload 16 bytes for 8 channels × `uint16_le`.
-- [ ] Open `/dev/cu.usbmodem*` (macOS) / `/dev/ttyACM*` (Linux).
-- [ ] `<termios.h>` config: 115200 8N1, raw mode, `VMIN=0`, `VTIME=0`.
-- [ ] Selectable via env `FC_RC_DEVICE` (path) and `FC_RC_BAUD` (default 115200).
-- [ ] **Boot probe**: send `MSP_API_VERSION` (cmd 1); refuse to enter `Tracking` / `Takeoff` modes if no reply.
-- [ ] **Boot probe**: `MSP_RC_TUNING`; assert rate profile matches expected (configurable threshold). Log mismatch as WARNING; continue but require operator confirm before mode change.
-- [ ] **Continuous heartbeat**: write at 50 Hz. Track success ratio in TEL via new field `msp_tx_ratio: float`.
-- [ ] **Errors**: on `EAGAIN`/short write, retry once; on persistent failure, transition through the failsafe state machine (do *not* directly `setControlMode(LandSafely)` — go through `StaleHard` path).
-- [ ] **MSP_RC query** for arm-switch state — used by S0.14 / Sprint 1 arm-authority logic.
+- [x] Implement `src/fc/implementation/MspRcSink.cpp` against `IRcSink`.
+- [x] **MSPv1 framing**: `$M<` + size + cmd + payload + xor checksum.
+- [x] **Cmd 200 (`MSP_SET_RAW_RC`)** — payload 16 bytes for 8 channels × `uint16_le`.
+- [x] Open `/dev/cu.usbmodem*` (macOS) / `/dev/ttyACM*` (Linux).
+- [x] `<termios.h>` config: 115200 8N1, raw mode, `VMIN=0`, `VTIME=0`.
+- [x] Selectable via env `FC_RC_DEVICE` (path) and `FC_RC_BAUD` (default 115200).
+- [x] **Boot probe**: send `MSP_API_VERSION` (cmd 1); refuse to enter `Tracking` / `Takeoff` modes if no reply. (Mode gate is centralised in `apply_control_mode_safely`.)
+- [x] **Boot probe**: `MSP_RC_TUNING`; on no-reply set `tuning_mismatch_=true` which gates `Tracking`/`Takeoff` identically to a boot-probe failure. Operator-confirm UI for the mismatch path is deferred to S0.14.
+- [x] **Continuous heartbeat**: write at 50 Hz. Surfaced as TEL field `msp_tx_ratio` (EWMA, α=0.05, init=1.0 optimistic).
+- [x] **Errors**: `EAGAIN`/`EINTR`/short-write retry-once with progress vs no-progress separation; persistent failure closes fd → `ok()` flips false → main loop's parallel `sink_degraded_engaged` latch routes through `setControlMode(LandSafely)` (kept separate from CMD-stale `failsafe_engaged` to preserve recovery semantics).
+- [x] **MSP_RC query** for arm-switch state — 5 Hz poll latches `arm_switch_` via aux1 ≥1700 µs. Force-cleared after 1 s of no reply to prevent stale latches feeding S0.14's gate.
 - [ ] **Bench acceptance procedure** (run with motors physically detached):
   1. Connect FC via USB.
   2. `FC_RC_SINK=msp FC_RC_DEVICE=/dev/cu.usbmodem... ./build/src/fc/fc_app`.
@@ -283,7 +283,7 @@ Priority within Sprint 0: P0 → P1 → P2. P0 must be green by May 11; P1 shoul
   6. Stop CMD → confirm StaleHard path; channels should snap to neutral / land profile (NOT arm).
 - [ ] If USB arming is refused (expected), document the symptom in `docs/decisions.md` ADR-005 → defer to Sprint 1 UART pivot.
 - [ ] **Acceptance:** Betaflight Configurator "Receiver" tab visibly tracks `fc_app` channel writes in real time, and `MSP_API_VERSION` boot probe succeeds.
-- [ ] **Files (new):** `src/fc/header/MspRcSink.h`, `src/fc/implementation/MspRcSink.cpp`, `src/fc/implementation/MspFraming.cpp`, `src/fc/header/MspFraming.h`. **(modified):** `src/fc/CMakeLists.txt`, `src/fc/implementation/main.cpp`.
+- [x] **Files (new):** `src/fc/header/MspRcSink.h`, `src/fc/implementation/MspRcSink.cpp`, `src/fc/implementation/MspFraming.cpp`, `src/fc/header/MspFraming.h`. **(modified):** `src/fc/CMakeLists.txt`, `src/fc/implementation/main.cpp`, `src/fc/header/RcSink.h` (added `tx_ratio()` / `arm_switch()` / `tuning_mismatch()` virtuals).
 
 ### S0.9 — Hover throttle calibration script
 
@@ -1341,6 +1341,152 @@ If Eddi can move past these without John, they go in Sprint 0:
 - Next session: S0.8 (USB MSP driver — `MspRcSink`, MSPv1 framing,
   boot probes, Betaflight Configurator visual acceptance). Branch
   `chore/sprint0-msp-driver` once this PR merges.
+
+### 2026-05-09 — Eddi + Claude — S0.8 USB MSP driver (`chore/sprint0-msp-driver`)
+
+- Branch `chore/sprint0-msp-driver` off `dev` (post-merge of S0.7 PR
+  #27, head `6c99af8`). Six functional + review-driven commits + this
+  Progress Log entry:
+  1. `feat(fc): MspFraming MSPv1 encode/parse + xor checksum` — pure
+     functions, no I/O, no globals: `encode_request`,
+     `encode_set_raw_rc` (with defence-in-depth clamp to 1000–2000 µs),
+     `parse_response` (incremental, tolerates partial frames + leading
+     garbage + bad checksums), `xor_checksum`. New
+     `src/fc/header/MspFraming.h` + `implementation/MspFraming.cpp`.
+     14 ctest cases pin the exact wire-byte sequence (e.g. all-1500 →
+     22-byte frame ending `0xD8`) so a future endianness or checksum
+     bug fails CI before reaching real hardware.
+  2. `feat(fc): MspRcSink USB MSP driver + IRcSink::tx_ratio/arm_switch`
+     — `from_device` opens the serial node, configures termios (115200
+     8N1 raw / `VMIN=0` / `VTIME=0` / no flow control), runs
+     `MSP_API_VERSION` (500 ms timeout via `select()`) + best-effort
+     `MSP_RC_TUNING` probes. `make_for_testing` is the socketpair seam
+     that skips probes. Per-tick: encode `MSP_SET_RAW_RC`, write with
+     EAGAIN/EINTR/short-write retry-once. Persistent failure closes
+     fd → `ok()` flips false. EWMA `tx_ratio_` (α=0.05, init=1.0
+     optimistic). Every 10th tick (5 Hz) `poll_msp_rc_` drains pending
+     bytes non-blocking, latches `arm_switch_` from aux1 ≥1700 µs,
+     sends fresh MSP_RC query. `IRcSink` gains `tx_ratio()` and
+     `arm_switch()` virtuals (default 1.0 / false). 6 ctest cases
+     using `socketpair(AF_UNIX, SOCK_STREAM)`.
+  3. `feat(fc): wire FC_RC_SINK=msp through make_rc_sink_from_env` —
+     replaced the S0.7 placeholder at `main.cpp:215-219` with real
+     construction. `FC_RC_DEVICE` validated up-front via `stat()` +
+     `S_ISCHR` so operator typos like `/etc/hosts` refuse cleanly with
+     the path named (rather than later "tcgetattr failed"). `FC_RC_BAUD`
+     strict `from_chars` parse, default 115200, refused on trailing
+     junk. 5 new pytest subprocess cases cover the operator-facing
+     failure modes (no device, nonexistent path, regular file, non-
+     numeric baud, baud with trailing junk). Removed the obsolete
+     "msp not yet implemented" pointer test.
+  4. `feat(fc): TEL msp_tx_ratio + sink-degraded failsafe + mode gate`
+     — `build_tel_json` gains a `tx_ratio` parameter; new field sits
+     between `cmd_age_s` and `tracking_state` in the output JSON.
+     Backend `tel_schema.py` is permissive (extra fields dropped at
+     the WS layer for now). Parallel `sink_degraded_engaged` latch
+     alongside the existing `failsafe_engaged` latch — kept SEPARATE
+     per Plan-agent feedback during the design pass: merging would
+     have lost recovery semantics where a CMD recovery would
+     spuriously re-enable mode transitions while MSP was still wedged.
+     New `apply_control_mode_safely` helper centralises the mode-gate:
+     refuses Tracking/Takeoff when `!ok()` OR `tuning_mismatch()`;
+     `LandSafely` and `Manual` always allowed. `IRcSink::tuning_mismatch()`
+     virtual added (default false).
+  5. `fix(fc): S0.8 review-driven correctness fixes (round 1)` —
+     comprehensive code-review pass via `general-purpose` subagent
+     surfaced 12 findings; round 1 closes the 7 correctness ones:
+     **#1 SIGPIPE ignored process-wide** in `main()` — was a production
+     crash bug (USB unplug would terminate fc_app outright, bypassing
+     the failsafe path). **#4** `write_frame_` retry budget rewritten:
+     successful writes (even 1-byte short) reset the no-progress
+     counter; only consecutive EAGAIN/EINTR count toward the budget.
+     A `kMaxTotal=32` total-attempts cap prevents pathological
+     1-byte/EAGAIN cycles. **#5** `arm_switch_` force-cleared after
+     1 s of no MSP_RC reply (was sticky — a USB hiccup could leave
+     stale state for S0.14's gate to act on). **#6** `parse_errors_`
+     counter + log on bad-checksum drops; **#2** boot/tuning probes
+     log non-target frames they discard. **#11** recovery logs name
+     the cross-latch state. **#3** tuning-probe-failure log includes
+     the operator recovery procedure (stop fc_app, reseat USB, restart).
+  6. `test(fc): close S0.8 review test gaps + remove dead probe seam`
+     (round 2) — **#8** SET_RAW_RC frame test now uses distinguishable
+     per-channel values (1100/1200/1300/1400/1500/1600/1700/1800) so
+     a future roll/pitch/yaw permutation can't slip through CI.
+     **#9** new test verifies `arm_switch_` flips back to false on a
+     subsequent below-threshold MSP_RC reply (catches a future
+     "make latch sticky" regression). **#10** removed dead
+     `OwnsBootProbe::Yes` branch of `make_for_testing` — no test
+     exercised it; collapsed to single-arg `make_for_testing(int fd)`.
+- Verification:
+  - `cmake --build build -j` clean.
+  - `ctest --test-dir build` => 8/8 (was 7; +1 for `test_msp_framing`,
+    +1 for `test_msp_rc_sink`, no other tests touched).
+  - `python -m pytest tests/ -q` => 173 passed (was 169; +5 new MSP
+    env-var cases, -1 obsolete S0.7 placeholder pointer test).
+  - `python -m pre_commit run --all-files` clean (clang-format and
+    ruff-format applied; reviewed).
+  - `npm --prefix src/webapp run test` clean (untouched).
+  - End-to-end smoke (default null sink): fc_app still boots cleanly
+    with `FC_RC_SINK` unset; first writeChannels logs the NullSink
+    banner.
+  - Real-FC bench acceptance (steps 1-6 in S0.8 spec) deferred until
+    Eddi runs the procedure with motors detached.
+- Subsequent CI follow-ups on the same branch:
+  - `test(fc): de-flake test_default_null_sink_runs_until_signaled` —
+    GitHub Actions hit a multi-threaded stdout interleaving where the
+    main banner got mid-line interrupted by the CommandServer worker's
+    "Waiting for TCP command client" log. The contiguous substring
+    `RC sink=null` could be split across the worker's interjection.
+    Fix accepts either the unmangled banner OR NullSink's first-write
+    log (which is unique to the null-sink path). The race has existed
+    since CommandServer was added pre-S0.7 — finally tripped on this
+    runner. Deferred a stdout-mutex fix to a future cleanup.
+  - `ci: drop redundant apt-get install of cmake/g++` —
+    `azure.archive.ubuntu.com` was unreachable on the runner and the
+    apt step hung for 90 minutes before failing. cmake and g++ are
+    pre-installed on `ubuntu-latest`, so the entire `Install build
+    deps` step was a no-op except for `apt-get update` blocking on
+    flaky mirrors. Removed the step.
+- New env vars (extending the S0.7 inventory):
+  - `FC_RC_DEVICE` (msp) — required when `FC_RC_SINK=msp`. Examples:
+    `/dev/cu.usbmodem4321` on macOS, `/dev/ttyACM0` on Linux.
+  - `FC_RC_BAUD` (msp) — default `115200`. Allowlist: 9600, 19200,
+    38400, 57600, 115200, 230400, 460800, 921600.
+- Out of scope (deferred):
+  - **S0.14** — arm-authority three-condition gate, `runTakeoffMode
+    setArm(true)` removal, operator-confirm UI for `tuning_mismatch`.
+    S0.8 only exposes the `arm_switch()` data path.
+  - **S0.9** — hover-throttle calibration script.
+  - **Sprint 1 H2 UART pivot** — if USB arming proves unreliable
+    during bench acceptance, the MSP driver moves to UART. The
+    `IRcSink` interface keeps this a transport swap, not a rewrite.
+  - **Sprint 1 H2** — periodic re-probe of `MSP_RC_TUNING` for
+    in-flight recovery. S0.8 is set-once: `tuning_mismatch_` cannot
+    be cleared without restarting fc_app; the operator-facing log
+    documents the workaround.
+  - **Future cleanup** — synchronise `std::cout` writes across threads
+    (CommandServer worker vs main banner). Pre-existing race; surfaced
+    by the de-flake commit above.
+- Process notes:
+  - Plan-mode pass before coding (Phase 1-4) caught two design errors
+    that round-1 review would otherwise have flagged: parallel-vs-merged
+    failsafe latches (kept separate to preserve recovery semantics)
+    and single-helper mode gate (vs sprinkling the check). The
+    `general-purpose` review subagent then surfaced 12 more findings,
+    10 of which landed in two follow-up commits. Two findings (#7
+    tcflush logging and #12 ignored mode-gate return value) were
+    deliberately skipped — minor + defensible respectively.
+  - Pre-commit's clang-format + ruff-format reformatted on every
+    commit. Re-staging via `git add -u` after a hook-triggered
+    failure is now muscle memory.
+  - The `make_for_testing(int fd)` test seam is a minimal abstraction
+    over the production `from_device` path. A `Transport` interface
+    would have been over-engineering for one production transport —
+    deferred to Sprint 1 H2 when UART joins USB and there are two
+    real transports to share code between.
+- Next session: S0.9 (hover-throttle calibration script — bench-only)
+  OR S0.14 (arm-authority gate, requires S0.8 bench result first).
+  Eddi to run S0.8 bench acceptance before either.
 
 ### 2026-05-15 — Eddi + Claude — S0.9 hover throttle calibration (`chore/sprint0-hover-calibration`)
 
