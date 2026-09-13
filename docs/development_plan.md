@@ -289,17 +289,17 @@ Priority within Sprint 0: P0 → P1 → P2. P0 must be green by May 11; P1 shoul
 
 > **Bench-only.** No motors spinning. The script walks a stick command and observes Betaflight's reported channel; the operator notes lift-off µs only when motors are on (Sprint 1).
 
-- [ ] `scripts/dev/hover_calibration.py`:
-  - Connects to backend WS to drive `Manual` mode and override throttle setpoint.
-  - Walks throttle from 1000 → 1700 µs in 10 µs steps, holding 1 s each.
-  - Logs to CSV: `(t, requested_us, observed_msp_us)` via the FC's recording sink.
-  - Prompts operator at each step for "lift-off / stable / clipping" classification.
-- [ ] New `fc_app` flag / env: `--hover-throttle <us>` (default `0` = "uncalibrated").
-- [ ] `runTakeoffMode` and `runFollowTargetLogic` refuse to operate with `hoverThrottle_ == 0` → transition to `StaleHard` with telemetry warning.
-- [ ] **Fix throttle ceiling** (finding 2): rename `kAltHoldMaxThrottle` → `kAltHoldNeutralThrottle = 1500`; add `kAltHoldMaxThrottle = 1800` (or DRONE_MAX). Re-derive `commandAltHoldDelta` so positive delta truly climbs.
-- [ ] `setHoverThrottle` clamps to `[rc::DRONE_MIN, kAltHoldMaxThrottle]` (the new wider ceiling).
-- [ ] **Files:** `src/fc/implementation/FlightController.cpp:298, 431-451`, `src/fc/header/FlightController.h:145`, new `scripts/dev/hover_calibration.py`.
-- [ ] **Acceptance:** Bench script runs to completion against `RecordingSink`; produces a CSV that John + Eddi can later use during Sprint 1 motor tests.
+- [x] `scripts/dev/hover_calibration.py`:
+  - Connects to backend `/api/intent` (HTTP POST) to drive `Manual` mode and override throttle setpoint. Spec said "backend WS" but `/ws` is broadcast-out, not CMD-ingress; `/api/intent` is the documented operator path.
+  - Walks throttle from 1000 → 1700 µs in 10 µs steps, holding 1 s each (`--hold-s`).
+  - Logs to CSV: `(step_idx, requested_us, observed_us, classification, notes)` via the FC's recording sink. `observed_us` reflects what fc_app SENT post-clamp, not what the FC echoed via MSP_RC — documented in the script's docstring (TEL echo extension deferred to Sprint 1 H3).
+  - Prompts operator at each step for "liftoff / stable / clipping / skip" classification. `--unattended` flag skips prompts for CI smoke.
+- [x] New `fc_app` flag / env: `FC_HOVER_THROTTLE=<us>` (default `0` = "uncalibrated"). Spec said `--hover-throttle <us>` (flag) but fc_app is env-vars-only by convention; implemented as env var to match the existing FC_TEL_PORT / FC_RC_BAUD pattern.
+- [x] `runTakeoffMode` and `runFollowTargetLogic` refuse to operate with `hoverThrottle_ == 0` → transition to `LandSafely` (FC's safe fallback; there's no explicit `StaleHard` state to transition to). Per-tick refusal matches the spec's defense-in-depth intent — the `apply_control_mode_safely` gate prevents entry, the per-tick guards catch any in-flight setHoverThrottle(0) call.
+- [x] **Fix throttle ceiling** (audit finding #2): new `kAltHoldMaxThrottle = 1800` replaces the old 1500 used as both clamp and ceiling. `commandAltHoldDelta` positive-delta now reaches 1800 from any hover. Note: an intermediate draft also introduced `kAltHoldNeutralThrottle = 1500` per the literal spec wording but it was unreferenced — the alt-hold neutral pivot is `hoverThrottle_` itself, no separate constant needed. Dropped in round 2.
+- [x] `setHoverThrottle` clamps to `[rc::DRONE_MIN, kAltHoldMaxThrottle]` (the new wider ceiling 1800). Sentinel value 0 is preserved as-is so the gate's "uncalibrated" semantics survive an explicit `FC_HOVER_THROTTLE=0`.
+- [x] **Files:** `src/fc/implementation/FlightController.cpp` (constants, setHoverThrottle, commandAltHoldDelta, runTakeoffMode, runFollowTargetLogic), `src/fc/header/FlightController.h` (default + getHoverThrottle), `src/fc/implementation/main.cpp` (apply_control_mode_safely gate + FC_HOVER_THROTTLE parse), new `scripts/dev/hover_calibration.py`, new `tests/fc/test_alt_hold_ceiling.cpp`, new `tests/test_fc_hover_throttle_env.py`, new `tests/test_apply_control_mode_safely_hover_gate.py`, new `tests/test_hover_calibration_script.py`.
+- [ ] **Acceptance:** Bench script runs to completion against `RecordingSink`; produces a CSV that John + Eddi can later use during Sprint 1 motor tests. (Requires Eddi to run the bench procedure with FC plugged in; not gated by code review.)
 
 ## P1 — Should-do
 
@@ -1341,5 +1341,155 @@ If Eddi can move past these without John, they go in Sprint 0:
 - Next session: S0.8 (USB MSP driver — `MspRcSink`, MSPv1 framing,
   boot probes, Betaflight Configurator visual acceptance). Branch
   `chore/sprint0-msp-driver` once this PR merges.
+
+### 2026-05-15 — Eddi + Claude — S0.9 hover throttle calibration (`chore/sprint0-hover-calibration`)
+
+- Branch `chore/sprint0-hover-calibration` off `dev` at `fa074f1`
+  (post-merge of the S0.8 hotfix PR #29). Six commits + this Progress
+  Log entry:
+  1. `fix(fc): hoverThrottle_ default 0 + uncalibrated-refuses-mode
+     gate` — closed audit M-09 (pre-fix the FC happily flew Takeoff /
+     Tracking with an arbitrary hardcoded 1100 µs hover that no
+     operator had calibrated). Default flipped to 0 (uncalibrated
+     sentinel); `apply_control_mode_safely` extended with a third gate
+     alongside S0.8's `!ok()` and `tuning_mismatch()` checks — refuses
+     Tracking / Takeoff transitions until the operator calibrates.
+     Manual NOT gated — operator-direct, clampCommandChannels handles
+     the 0→DRONE_MIN edge safely. New
+     `tests/test_apply_control_mode_safely_hover_gate.py` exercises
+     the gate at the binary boundary via TCP CMD injection.
+  2. `fix(fc): throttle ceiling rename — kAltHoldMaxThrottle 1800
+     (audit #2)` — pre-fix the single 1500 constant served as both
+     alt-hold neutral pivot AND the upper clamp on `hoverThrottle_` AND
+     the positive-delta ceiling. Conflation broke real-world hover: a
+     calibrated hover ≥1500 had zero climb headroom even though the
+     FC could safely accept up to DRONE_MAX. Now the ceiling is 1800
+     (200µs safety margin below DRONE_MAX); positive delta from any
+     hover reaches it. `setHoverThrottle(0)` preserves the sentinel
+     instead of clamping up to DRONE_MIN — otherwise `FC_HOVER_THROTTLE=0`
+     would silently bypass the gate. New
+     `tests/fc/test_alt_hold_ceiling.cpp` pins the constant semantics
+     in <1s ctest. The Python `test_alt_hold_positive_delta_*` test
+     was rewritten — it had been pinning the broken `<= 1500` cap,
+     letting the bug pass CI.
+  3. `feat(fc): FC_HOVER_THROTTLE env var` — operator-facing
+     calibration knob. Strict `from_chars` parse (rejects trailing
+     junk like "1100abc") with explicit range refusal for
+     out-of-band values; silent clamping would mask operator typos
+     (missing leading digit, transposed digits). Permitted values: 0
+     (explicit uncalibrate) OR `[DRONE_MIN, 1800]`. Spec said
+     `--hover-throttle <us>` (CLI flag) but the codebase is
+     env-vars-only; implemented as env var to match the inventory.
+  4. `feat(scripts): hover_calibration.py — throttle sweep with
+     operator prompts` — new bench script that walks throttle
+     1000→1700 µs in 10 µs steps via HTTP POST to backend
+     `/api/intent`. Spec said "backend WS" but `/ws` is broadcast-out,
+     not CMD-ingress; `/api/intent` is the documented operator path.
+     Pattern reuses urllib.request from `scripts/dev/push_frame.py`
+     (no new deps). Per-step: POST setpoint → hold → prompt operator
+     for liftoff/stable/clipping/skip → read latest RecordingSink CSV
+     row for observed_us → write CSV row. `--unattended` skips
+     prompts for CI smoke. New `tests/test_hover_calibration_script.py`
+     spins up a stdlib ThreadingHTTPServer mock at a free port; 6 cases.
+  5. `fix(fc): S0.9 review-driven correctness fixes (round 1)` —
+     subagent code review surfaced 11 findings. Round 1:
+     - Per-tick uncalibrated guards in `runTakeoffMode` and
+       `runFollowTargetLogic`. The CMD-apply gate prevents ENTRY;
+       these guard the per-tick body so a future in-flight
+       `setHoverThrottle(0)` call can't write throttle=0 → full-cut.
+       The dev plan asked for these explicitly.
+     - Defensive early-return in `commandAltHoldDelta` when hover=0,
+       same rationale.
+     - Bumped subprocess test wait from 200ms to 800ms — review #7
+       flagged CI flake risk on contended runners.
+  6. `test(fc,scripts): close S0.9 review test gaps + drop dead
+     constant (round 2)` —
+     - Removed `kAltHoldNeutralThrottle = 1500`: defined but never
+       referenced (the alt-hold neutral pivot is `hoverThrottle_`
+       itself, not a separate constant). The original rename was a
+       misreading of the spec wording; this commit reverts that piece.
+     - Added DRONE_MIN boundary cases to the setHoverThrottle test.
+     - Added multi-CSV `_latest_csv` selection test for the
+       calibration script (catches a regression that drops
+       `reverse=True` from the sort).
+     - Added FC_HOVER_THROTTLE=-100 negative-value env test case.
+
+- Verification:
+  - `cmake --build build -j` clean.
+  - `ctest --test-dir build` => 9/9 (was 8; +1 for `test_alt_hold_ceiling`).
+  - `python -m pytest tests/ -q` => 190 passed (was 174; +13 new S0.9
+    cases across env, gate, calibration script, ceiling tests, and 3
+    pre-existing tests updated to call setHoverThrottle(1100)
+    explicitly since the per-tick guards now route uncalibrated
+    Tracking/Takeoff to LandSafely).
+  - `python -m pre_commit run --all-files` clean (clang-format +
+    ruff-format applied; reviewed).
+  - `npm --prefix src/webapp run test` clean (untouched).
+
+- New env vars (extending the post-S0.8 inventory):
+  - `FC_HOVER_THROTTLE=<us>` — operator-calibrated hover. Default 0
+    (uncalibrated) gates Tracking/Takeoff. Range: 0 or
+    `[DRONE_MIN, 1800]`. Strict parse refuses trailing junk and
+    out-of-range values up front.
+
+- Spec/impl divergences called out:
+  - Env var `FC_HOVER_THROTTLE` (impl) vs `--hover-throttle <us>`
+    (spec). Codebase-fit; flag-style scaffolding doesn't exist.
+  - HTTP POST `/api/intent` (impl) vs "backend WS" (spec). `/ws` is
+    broadcast-out, not CMD-ingress. `/api/intent` is the documented
+    operator path.
+  - `setControlMode(LandSafely)` (impl) vs "transition to StaleHard"
+    (spec). FC has no explicit `StaleHard` state; LandSafely is the
+    safe fallback — matches the S0.8 spec interpretation for the same
+    phrasing.
+  - `kAltHoldNeutralThrottle` (spec rename) was implemented then
+    dropped: the alt-hold neutral pivot is `hoverThrottle_` itself,
+    not a separate constant. The constant existed only to confuse
+    future readers.
+
+- Out of scope (deferred):
+  - **Sprint 1 H1** — actual motor spin-up tests. The S0.9 CSV is
+    the bench-side input to that work.
+  - **S0.14** — operator-confirm UI for uncalibrated mode-gate
+    refusals; arm-authority three-condition gate consumes
+    `arm_switch` from S0.8.
+  - **Sprint 1 H3** — extending TEL with the FC's MSP_RC echo
+    channel values, so the calibration script's `observed_us`
+    column reflects what the FC actually saw (not what fc_app
+    sent post-clamp). Documented in the script docstring.
+
+- Process notes:
+  - The Plan-agent pass caught two design issues before coding:
+    - `hoverThrottle_=0` default exposes a sentinel collision with
+      tests that depended on the old 1100 default (Plan agent
+      flagged 3 tests; all 3 got setHoverThrottle(1100) calls
+      added explicitly).
+    - The `setHoverThrottle(0) → DRONE_MIN` clamp would have
+      silently bypassed the gate; caught only by the new
+      test_alt_hold_ceiling boundary case during implementation.
+  - The code-review pass surfaced two more design issues:
+    - `commandAltHoldDelta` and the per-tick mode handlers
+      (`runTakeoffMode`, `runFollowTargetLogic`) needed
+      defense-in-depth guards beyond the apply_control_mode_safely
+      boundary, per the spec's literal wording.
+    - The "rename kAltHoldMaxThrottle → kAltHoldNeutralThrottle"
+      half of the spec was a misreading; the constant had no
+      semantic role. Round 2 dropped it.
+  - Three pre-S0.9 tests had implicit dependencies on
+    `hoverThrottle_=1100` default and needed explicit
+    setHoverThrottle calls. Worth flagging that defaults-changes are
+    high-leverage and surface implicit test assumptions.
+
+- Bench acceptance (Eddi-driven, motors detached): run
+  `scripts/dev/hover_calibration.py` against `FC_RC_SINK=recording
+  fc_app + uvicorn backend`, confirm the 71-step CSV produces a
+  monotonic requested_us column and observed_us tracks within
+  clamping rules. Defer the lift-off/clipping classification work
+  to Sprint 1 H1 when motors come back online.
+
+- Next session: Sprint 0 wrap-up — close any remaining P1/P2 items
+  if time permits, or transition to Sprint 1 planning. S0.10
+  (slew limiter), S0.11 (vision input filtering), S0.12 (yaw PID),
+  S0.13 (alt-hold polish), S0.14 (arm-authority) are all open.
 
 ### (future entries here)

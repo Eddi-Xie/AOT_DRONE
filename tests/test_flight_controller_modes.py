@@ -41,11 +41,16 @@ def _compile_and_run_cpp(tmp_path: Path, source_text: str) -> subprocess.Complet
 
 
 def test_takeoff_auto_transitions_to_tracking(tmp_path: Path) -> None:
+    # S0.9 added per-tick uncalibrated-hover guards to runTakeoffMode and
+    # runFollowTargetLogic; without an explicit setHoverThrottle the
+    # default-0 sentinel routes both to LandSafely. This test exercises
+    # the calibrated-hover happy path, so set a realistic value first.
     source = r"""
 #include "FlightController.h"
 
 int main() {
     fc::FlightController controller;
+    controller.setHoverThrottle(1100);
     controller.setControlMode(fc::ControlMode::Takeoff);
 
     for (int i = 0; i < 400; ++i) {
@@ -151,25 +156,147 @@ int main() {
 def test_alt_hold_positive_delta_never_reduces_throttle_at_high_hover_setting(
     tmp_path: Path,
 ) -> None:
+    # Pre-S0.9 the alt-hold ceiling was 1500 µs — the SAME value used as
+    # both the alt-hold neutral and the upper clamp on setHoverThrottle.
+    # Positive delta at any hoverThrottle_ >= 1500 had zero headroom even
+    # though the FC could safely accept up to DRONE_MAX. The old version
+    # of this test PINNED that broken behavior with `neutral > 1500 ||
+    # climb > 1500` returning failure.
+    #
+    # Post-S0.9 (audit #2 fix): kAltHoldMaxThrottle = 1800 is the upper
+    # ceiling, and the alt-hold neutral pivot is hoverThrottle_ itself
+    # (no separate kAltHoldNeutralThrottle constant — see
+    # FlightController.cpp's anonymous-namespace comment block for why).
+    # setHoverThrottle clamps to [DRONE_MIN, 1800] so calibrated hovers
+    # above 1500 are now accepted, and commandAltHoldDelta(1.0) actually
+    # climbs from there.
+    #
+    # New assertions:
+    #   (a) climb >= neutral — positive delta never reduces throttle
+    #   (b) climb <= DRONE_MAX — safety bound
+    #   (c) with a realistic 1100 µs hover, commandAltHoldDelta(1.0)
+    #       must reach the new ceiling (1800), proving the fix.
     source = r"""
 #include "FlightController.h"
 
+#include <cstdio>
+
+int main() {
+    // Case 1: hover set above old broken ceiling (1500 → clamped to new
+    // ceiling 1800). climb must not reduce throttle.
+    {
+        fc::FlightController controller;
+        controller.setHoverThrottle(1800);
+
+        controller.commandAltHoldDelta(0.0);
+        const std::uint16_t neutral = controller.getCurrentCommand().throttle;
+        controller.commandAltHoldDelta(1.0);
+        const std::uint16_t climb = controller.getCurrentCommand().throttle;
+
+        if (climb < neutral) {
+            std::fprintf(stderr, "case 1: climb=%u < neutral=%u\n",
+                         static_cast<unsigned>(climb), static_cast<unsigned>(neutral));
+            return 1;
+        }
+        if (climb > fc::rc::DRONE_MAX) {
+            std::fprintf(stderr, "case 1: climb=%u > DRONE_MAX=%u\n",
+                         static_cast<unsigned>(climb),
+                         static_cast<unsigned>(fc::rc::DRONE_MAX));
+            return 2;
+        }
+    }
+
+    // Case 2: realistic calibrated hover at 1100 µs. commandAltHoldDelta(1.0)
+    // should drive throttle to the new ceiling (1800). Pre-S0.9 this was
+    // clamped at 1500, leaving the FC unable to climb past the old
+    // neutral.
+    {
+        fc::FlightController controller;
+        controller.setHoverThrottle(1100);
+
+        controller.commandAltHoldDelta(1.0);
+        const std::uint16_t climb_from_1100 = controller.getCurrentCommand().throttle;
+
+        if (climb_from_1100 != 1800) {
+            std::fprintf(stderr,
+                         "case 2: expected climb from 1100 to reach 1800 (new ceiling), got %u\n",
+                         static_cast<unsigned>(climb_from_1100));
+            return 3;
+        }
+    }
+
+    return 0;
+}
+"""
+    run_result = _compile_and_run_cpp(tmp_path, source)
+    assert run_result.returncode == 0, run_result.stderr + run_result.stdout
+
+
+def test_tracking_mode_uncalibrated_mid_flight_ramps_via_landsafely(tmp_path: Path) -> None:
+    # S0.9 Copilot review round 3 (#6): the per-tick uncalibrated guard
+    # used to live inside runFollowTargetLogic and snap-wrote throttle to
+    # kMinLandThrottle in a single tick. Now the guard lives at the top
+    # of runTrackingMode and dispatches to runLandSafelyMode(deltaTime_s),
+    # producing the proper graduated 50 µs/s descent ramp instead. This
+    # test calibrates, enters Tracking, then re-uncalibrates mid-flight
+    # to force the guard, and asserts the throttle decays gradually
+    # rather than snapping to the land floor in one tick.
+    source = r"""
+#include "FlightController.h"
+
+#include <cstdio>
+
 int main() {
     fc::FlightController controller;
-    controller.setHoverThrottle(1800);
+    controller.setHoverThrottle(1500);
+    controller.setArm(true);
+    controller.setControlMode(fc::ControlMode::Tracking);
 
-    controller.commandAltHoldDelta(0.0);
-    const std::uint16_t neutral = controller.getCurrentCommand().throttle;
+    fc::TrackingMessage msg{};
+    msg.state = fc::TrackingState::Tracking;
+    msg.target_x = 0.0;
+    msg.target_y = 0.0;
+    msg.bound_w = 0.1;
+    msg.bound_h = 0.2;
+    msg.confidence = 1.0;
+    msg.timestamp_s = 1.0;
+    controller.updateTracking(msg);
 
-    controller.commandAltHoldDelta(1.0);
-    const std::uint16_t climb = controller.getCurrentCommand().throttle;
-
-    if (climb < neutral) {
+    // First tick: normal Tracking, throttle hovers near hoverThrottle_.
+    fc::BetaFlightCommand pre = controller.updateTimeStep(0.02);
+    if (pre.throttle < 1400) {
+        std::fprintf(stderr, "pre-tick throttle unexpectedly low: %u\n",
+                     static_cast<unsigned>(pre.throttle));
         return 1;
     }
-    if (neutral > 1500 || climb > 1500) {
+
+    // Force the mid-flight uncalibration scenario the guard defends.
+    controller.setHoverThrottle(0);
+
+    fc::BetaFlightCommand post = controller.updateTimeStep(0.02);
+    // Must have dispatched into LandSafely.
+    if (controller.getControlMode() != fc::ControlMode::LandSafely) {
+        std::fprintf(stderr, "expected LandSafely after uncalibration; got mode=%d\n",
+                     static_cast<int>(controller.getControlMode()));
         return 2;
     }
+    // Must NOT have snap-cut throttle to the land floor in one tick.
+    // (Pre-fix it would have written kMinLandThrottle = DRONE_MIN+30 = 1030.)
+    if (post.throttle <= 1100) {
+        std::fprintf(stderr, "throttle snapped instead of ramping: post=%u (pre=%u)\n",
+                     static_cast<unsigned>(post.throttle),
+                     static_cast<unsigned>(pre.throttle));
+        return 3;
+    }
+    // And the ramp must be downward — proves runLandSafelyMode actually
+    // ran the descent body, not just initialized the timer.
+    if (post.throttle > pre.throttle) {
+        std::fprintf(stderr, "expected throttle to decay: pre=%u post=%u\n",
+                     static_cast<unsigned>(pre.throttle),
+                     static_cast<unsigned>(post.throttle));
+        return 4;
+    }
+
     return 0;
 }
 """
@@ -178,11 +305,15 @@ int main() {
 
 
 def test_entering_manual_mode_clears_stale_tracking_axes(tmp_path: Path) -> None:
+    # Per-tick uncalibrated-hover guard (S0.9) routes Tracking → LandSafely
+    # when hoverThrottle_ == 0. This test exercises the Tracking → Manual
+    # transition path; set a realistic hover so Tracking actually runs.
     source = r"""
 #include "FlightController.h"
 
 int main() {
     fc::FlightController controller;
+    controller.setHoverThrottle(1100);
     controller.setArm(true);
     controller.setControlMode(fc::ControlMode::Tracking);
 
